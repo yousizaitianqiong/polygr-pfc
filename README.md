@@ -71,6 +71,18 @@ cd example
 ..\polygr.exe quick1 quick2 --xyz quick.xyz --threads 8
 ```
 
+### Larger OVITO validation test
+
+The `medium1.in` and `medium2.in` inputs use a `144 x 144` grid and 18 initial
+grains. They produce a denser, more useful structure for checking the final
+XYZ file in OVITO Basic 3.15.5 while still running comfortably on a Windows
+workstation.
+
+```powershell
+cd example
+..\polygr.exe medium1 medium2 --xyz medium-ovito.xyz --threads 8
+```
+
 ### Quick MPI test
 
 ```bash
