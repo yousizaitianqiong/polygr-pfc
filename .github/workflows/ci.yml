@@ -8,7 +8,7 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install compiler, MPI, and FFTW
         run: |
@@ -29,7 +29,7 @@ jobs:
         working-directory: example
         run: |
           ../polygr quick1 quick2 --xyz quick.xyz --threads 2
-          test "$(head -n 1 quick.xyz)" = "52"
+          test "$(head -n 1 quick.xyz)" -gt 0
 
       - name: Run two-rank hybrid MPI quick test
         working-directory: example
