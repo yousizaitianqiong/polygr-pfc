@@ -1,0 +1,7 @@
+# Small end-to-end test: reload, relax, and emit XYZ
+S 34789847
+O 10 20
+A 48 48
+I 2 quick1-t-20.dat -0.072 0.1
+M -0.15 1.0 0.87 1.0 0
+R 20 0.7 0.7 1.0 10

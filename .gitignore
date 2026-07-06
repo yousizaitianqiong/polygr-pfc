@@ -1,0 +1,11 @@
+# Build products and bundled runtime libraries
+polygr
+polygr.exe
+*.dll
+
+# PFC and coordinate output
+*.out
+*-t-*.dat
+*.xyz
+*.xy
+*.nh

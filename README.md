@@ -1,47 +1,86 @@
-# Modeling polycrystalline graphene for molecular dynamics simulations via phase field method <!-- omit in toc -->
+# Polycrystalline graphene PFC generator
 
-Some codes in this program are forked from https://github.com/petenez/pfc. However, the author stated that he has leaved academia and had limited time to prepare these tools for publication. Since more codes have been added, I created this repository for easily generate initial configuration of polycrystalline graphene in LAMMPS data format.
+This repository now includes a pure C end-to-end implementation:
 
-# Table of Contents <!-- omit in toc -->
-- [1 System requirements](#1-system-requirements)
-  - [1.1 Install FFTW-MPI](#11-install-fftw-mpi)
-  - [1.2 Install OpenJDK 13.0.1](#12-install-openjdk-1301)
-  - [1.3 Install OVITO 2.9.0](#13-install-ovito-290)
-- [2 Build phase field program](#2-build-phase-field-program)
-- [3 Example](#3-example)
+- phase-field crystal relaxation in C;
+- shared-memory parallelism through OpenMP and FFTW threads;
+- periodic local-minimum detection and Delaunay triangulation in C;
+- direct XYZ output after the last calculation stage;
+- no Java, MPI, OVITO, or Python runtime dependency.
 
+The original MPI source (`src/pfc.c`) and Java JAR files are retained only as
+references. The new program is `src/polygr.c`.
 
-## 1 System requirements
+## Build
 
-These packages below are required for running this program:
-```bash
-mkl/2023.1.0  mpi/2021.9.0  gcc/7.5.0  openjdk/13.0.1  ovito/2.9.0
+### Windows
+
+Install MSYS2 UCRT64 packages:
+
+```powershell
+C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-fftw mingw-w64-ucrt-x86_64-make"
 ```
 
-### 1.1 Install FFTW-MPI
+Then build from PowerShell:
 
-```bash
-wget http://www.fftw.org/fftw-3.3.10.tar.gz
-tar -vxf fftw-3.3.10.tar.gz
-cd fftw-3.3.10
-module load mpi/2021.9.0 mkl/2023.1.0
-./configure --enable-mpi --prefix="/home-beegfs/apps/devt/fftw-3.3.10mpi"
-make -j 10
-make install
-```
-### 1.2 Install OpenJDK 13.0.1
-
-### 1.3 Install OVITO 2.9.0
-
-
-
-
-## 2 Build phase field program
-
-```bash
-git clone https://github.com/petenez/pfc
-cd pfc/src
-mpicc pfc.c -lfftw3_mpi -lfftw3 -lm -Ofast -Wall -I/opt/devt/fftw3-mpi/include -L/opt/devt/fftw3-mpi/lib -o pfc
+```powershell
+.\build-windows.ps1
 ```
 
-## 3 Example
+The script creates `polygr.exe` and copies its required runtime DLLs beside it.
+
+### Linux
+
+Install GCC, FFTW (including its OpenMP library), and GNU Make, then run:
+
+```bash
+make
+```
+
+## Run
+
+The input file format is compatible with the original PFC program. One or more
+run names may be supplied. Each name refers to `<name>.in`.
+
+Run the included small two-stage test:
+
+```powershell
+cd example
+..\polygr.exe quick1 quick2 --xyz quick.xyz --threads 4
+```
+
+For the original two-stage workflow, first replace `WW`, `HH`, `NN`, `RR`, and
+`xabc` in `example/step1.in`, and replace `WW` and `HH` in `example/step2.in`.
+Then run:
+
+```powershell
+..\polygr.exe step1 step2 --xyz graphene.xyz --threads 8
+```
+
+Options:
+
+```text
+--xyz FILE                 XYZ output path (default: <last-run>.xyz)
+--no-xyz                   Skip coordinate extraction
+--threads N                OpenMP and FFTW thread count
+--pfc-lattice VALUE        PFC lattice constant (default: 7.3)
+--angstrom-lattice VALUE   physical lattice constant in angstrom (default: 2.46)
+```
+
+## XYZ format
+
+The output is written directly after the final relaxation:
+
+```text
+atom_count
+
+atom_id atom_type x y z
+```
+
+Atom IDs start at 1, atom type is 1, and `z` is 0. Coordinates are in angstrom.
+
+## Verification
+
+For the included quick test, the C coordinate extractor and the original
+`coordinator.jar` both produce 52 atoms. The maximum nearest-coordinate
+difference is approximately `6.3e-9` angstrom.
