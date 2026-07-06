@@ -127,15 +127,20 @@ point-wise loops inside each MPI process. After the final relaxation:
 Rank 0 must have enough memory for one complete final density field during
 coordinate extraction.
 
-## XYZ format
+## OVITO / Extended XYZ format
 
 ```text
 atom_count
-
-atom_id atom_type x y z
+Lattice="..." Origin="0 0 -10" Properties="id:I:1:species:S:1:pos:R:3:radius:R:1:color:R:3" pbc="T T F"
+atom_id C x y z radius red green blue
 ```
 
-Atom IDs start at 1, atom type is 1, `z` is 0, and coordinates are in angstrom.
+The output follows the Extended XYZ convention understood directly by OVITO
+Basic 3.15.5. Atom IDs start at 1, the species is carbon (`C`), `z` is 0, and
+coordinates are in angstrom. The file stores the actual calculation cell,
+periodic boundaries in x/y, and a non-periodic 20-angstrom z dimension.
+Per-particle radius and color properties make the structure immediately
+visible when opened in OVITO without manual display configuration.
 
 ## Verification
 

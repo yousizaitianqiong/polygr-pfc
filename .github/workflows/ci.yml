@@ -30,6 +30,7 @@ jobs:
         run: |
           ../polygr quick1 quick2 --xyz quick.xyz --threads 2
           test "$(head -n 1 quick.xyz)" -gt 0
+          grep -q 'Properties="id:I:1:species:S:1:pos:R:3:radius:R:1:color:R:3"' quick.xyz
 
       - name: Run two-rank hybrid MPI quick test
         working-directory: example
@@ -38,3 +39,4 @@ jobs:
             --xyz quick-mpi.xyz \
             --threads 2
           test "$(head -n 1 quick-mpi.xyz)" -gt 0
+          grep -q 'Properties="id:I:1:species:S:1:pos:R:3:radius:R:1:color:R:3"' quick-mpi.xyz

@@ -281,10 +281,17 @@ void xyz_write_from_field(const double *source, int width, int height,
     qsort(carbons.items, carbons.count, sizeof(*carbons.items), point_compare);
     FILE *xyz = fopen(filename, "w");
     if (xyz == NULL) xyz_die("Unable to write XYZ output.");
-    fprintf(xyz, "%zu\n\n", carbons.count);
+    fprintf(xyz, "%zu\n", carbons.count);
+    fprintf(xyz,
+            "Lattice=\"%.10f 0 0 0 %.10f 0 0 0 20\" "
+            "Origin=\"0 0 -10\" "
+            "Properties=\"id:I:1:species:S:1:pos:R:3:"
+            "radius:R:1:color:R:3\" "
+            "pbc=\"T T F\"\n",
+            physical_width, physical_height);
     for (size_t i = 0; i < carbons.count; ++i) {
-        fprintf(xyz, "%zu 1 %.10f %.10f 0\n", i + 1, carbons.items[i].x,
-                carbons.items[i].y);
+        fprintf(xyz, "%zu C %.10f %.10f 0 0.70 0.35 0.35 0.35\n", i + 1,
+                carbons.items[i].x, carbons.items[i].y);
     }
     fclose(xyz);
     printf("Wrote %zu carbon atoms to %s\n", carbons.count, filename);
