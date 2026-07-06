@@ -185,7 +185,15 @@ double OMA(double x0, double y0, double u, double v, double l0, double theta) {
 // p and A are the average density and noise amplitude
 // N is number of crystallites and R their radius
 void polycrystalline_state(struct Arrays *arrays, double dx, double dy, double l0, double p, double A, int N, double R) {
-	double crystallites[3*N];	// array for crystallite coordinates and orientations
+	if(N <= 0 || R <= 0.0 || l0 <= 0.0) {
+		fprintf(stderr, "Invalid polycrystalline initialization parameters.\n");
+		MPI_Abort(MPI_COMM_WORLD, 1);
+	}
+	double *crystallites = malloc((size_t)3*N*sizeof(*crystallites));
+	if(crystallites == NULL) {
+		fprintf(stderr, "Unable to allocate crystallite parameters.\n");
+		MPI_Abort(MPI_COMM_WORLD, 1);
+	}
 	int w, h, gh, k, n, id;
 	MPI_Comm_rank(MPI_COMM_WORLD, &id);
 	if(id == 0) {						   // 0th process samples crystallites
@@ -213,6 +221,8 @@ void polycrystalline_state(struct Arrays *arrays, double dx, double dy, double l
 			arrays->q[k+w] = p;	// (1) set to average density
 			min = -1;
 			r2min = 1.0e100;
+			umin = 0.0;
+			vmin = 0.0;
 			for(n = 0; n < N; n++) {
 				u = w-crystallites[3*n];
 				// closest periodic image searched
@@ -236,6 +246,7 @@ void polycrystalline_state(struct Arrays *arrays, double dx, double dy, double l
 			arrays->q[k+w] += A*G*OMA(umin, vmin, 0.0, 0.0, l0, crystallites[3*min+2]);
 		}
 	}
+	free(crystallites);
 }
 
 // initializes the density field with data from a data file
@@ -334,8 +345,8 @@ void initialize_system(struct Arrays *arrays, FILE *input) {
 
 // saves state into a file
 void write_state(struct Arrays *arrays, struct Relaxation *relaxation, struct Output *output) {
-	char filename[128];			// filename
-	sprintf(filename, "%s-t-%d.dat", output->name, relaxation->t);
+	char filename[320];			// filename
+	snprintf(filename, sizeof(filename), "%s-t-%d.dat", output->name, relaxation->t);
 	FILE *file;					// file stream
 	int Wp = 2*(arrays->W/2+1);
 	int i, w, h, k;
@@ -344,6 +355,10 @@ void write_state(struct Arrays *arrays, struct Relaxation *relaxation, struct Ou
 		if(relaxation->id == i) {			// ith process continues, others go back waiting
 			if(relaxation->id == 0) file = fopen(filename, "w");	// 0th process overwrites possible previous data
 			else file = fopen(filename, "a");						// others append to end
+			if(file == NULL) {
+				fprintf(stderr, "Unable to write state file: %s\n", filename);
+				MPI_Abort(MPI_COMM_WORLD, 2);
+			}
 			for(h = 0; h < arrays->lH; h++) {
 				k = Wp*h;
 				for(w = 0; w < arrays->W; w++) {
@@ -361,10 +376,14 @@ void write_state(struct Arrays *arrays, struct Relaxation *relaxation, struct Ou
 void print(struct Relaxation *relaxation, struct Output *output) {
 	if(relaxation->id == 0) {			// only 0th process
 		printf("%d %d %.9lf %.9lf %.9lf %.9lf\n", relaxation->t, (int)(time(NULL)-relaxation->t0), relaxation->dx, relaxation->dy, relaxation->f, relaxation->p);
-		char filename[128];
-		sprintf(filename, "%s.out", output->name);
+		char filename[320];
+		snprintf(filename, sizeof(filename), "%s.out", output->name);
 		FILE *file;
 		file = fopen(filename, "a");	// need only append, empty file was already generated
+		if(file == NULL) {
+			fprintf(stderr, "Unable to write progress file: %s\n", filename);
+			MPI_Abort(MPI_COMM_WORLD, 2);
+		}
 		fprintf(file, "%d %d %.9lf %.9lf %.9lf %.9lf\n", relaxation->t, (int)(time(NULL)-relaxation->t0), relaxation->dx, relaxation->dy, relaxation->f, relaxation->p);
 		fclose(file);
 	}

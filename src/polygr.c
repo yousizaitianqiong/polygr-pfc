@@ -532,7 +532,8 @@ static void run_input(const char *name, Arrays *arrays, Relaxation *relaxation) 
     char line[1024];
     while (fscanf(input, " %c", &label) == 1) {
         if (label == '#') {
-            (void)fgets(line, sizeof(line), input);
+            char *comment = fgets(line, sizeof(line), input);
+            (void)comment;
         } else if (label == 'S') {
             seed_rng(input);
         } else if (label == 'O') {

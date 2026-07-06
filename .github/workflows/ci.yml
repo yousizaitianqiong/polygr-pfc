@@ -22,8 +22,8 @@ jobs:
 
       - name: Build single-host and hybrid MPI programs
         run: |
-          make
-          make mpi
+          make CFLAGS="-O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -fopenmp"
+          make mpi CFLAGS="-O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -fopenmp"
 
       - name: Run single-host quick test
         working-directory: example
