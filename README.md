@@ -1,75 +1,133 @@
 # Polycrystalline graphene PFC generator
 
-This repository now includes a pure C end-to-end implementation:
+This fork provides a pure C workflow from phase-field calculation to final
+graphene XYZ coordinates. The Java coordinator, Python, and OVITO conversion
+steps are no longer needed.
 
-- phase-field crystal relaxation in C;
-- shared-memory parallelism through OpenMP and FFTW threads;
-- periodic local-minimum detection and Delaunay triangulation in C;
-- direct XYZ output after the last calculation stage;
-- no Java, MPI, OVITO, or Python runtime dependency.
+Two parallel executables are provided:
 
-The original MPI source (`src/pfc.c`) and Java JAR files are retained only as
-references. The new program is `src/polygr.c`.
+| Program | Parallel model | Target |
+| --- | --- | --- |
+| `polygr` / `polygr.exe` | OpenMP + FFTW threads | Windows or one Linux host |
+| `polygr_mpi` | MPI + OpenMP + FFTW-MPI threads | Linux clusters and SLURM |
+
+Both programs use the same C coordinate module (`src/xyz.c`) for periodic
+local-minimum detection, Delaunay triangulation, and direct XYZ output.
+The original `src/pfc.c` and Java JAR files remain as reference material.
 
 ## Build
 
-### Windows
+### Windows single-host version
 
-Install MSYS2 UCRT64 packages:
+Install the MSYS2 UCRT64 packages:
 
 ```powershell
 C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-fftw mingw-w64-ucrt-x86_64-make"
 ```
 
-Then build from PowerShell:
+Build from PowerShell:
 
 ```powershell
 .\build-windows.ps1
 ```
 
-The script creates `polygr.exe` and copies its required runtime DLLs beside it.
+The script creates `polygr.exe` and copies the required runtime DLLs beside it.
 
-### Linux
+### Linux single-host version
 
-Install GCC, FFTW (including its OpenMP library), and GNU Make, then run:
+Install GCC, FFTW with its OpenMP library, and GNU Make, then run:
 
 ```bash
 make
 ```
 
+### Linux hybrid MPI version
+
+Install an MPI implementation, FFTW built with MPI and thread support, GCC,
+and GNU Make. Then run:
+
+```bash
+make mpi
+```
+
+The MPI link libraries can be overridden when a cluster uses custom paths:
+
+```bash
+make mpi CPPFLAGS="-I/opt/fftw/include" \
+    LDFLAGS="-L/opt/fftw/lib" \
+    MPI_LDLIBS="-lfftw3_mpi -lfftw3_omp -lfftw3 -lm"
+```
+
 ## Run
 
-The input file format is compatible with the original PFC program. One or more
-run names may be supplied. Each name refers to `<name>.in`.
+Each positional run name refers to `<name>.in`. Multiple names execute
+sequentially in one process or MPI job, so the original two PFC stages can be
+run with one command.
 
-Run the included small two-stage test:
+### Quick Windows test
 
 ```powershell
 cd example
-..\polygr.exe quick1 quick2 --xyz quick.xyz --threads 4
+..\polygr.exe quick1 quick2 --xyz quick.xyz --threads 8
 ```
 
-For the original two-stage workflow, first replace `WW`, `HH`, `NN`, `RR`, and
-`xabc` in `example/step1.in`, and replace `WW` and `HH` in `example/step2.in`.
-Then run:
+### Quick MPI test
 
-```powershell
-..\polygr.exe step1 step2 --xyz graphene.xyz --threads 8
+```bash
+cd example
+mpirun -np 2 ../polygr_mpi quick1 quick2 \
+    --xyz quick-mpi.xyz \
+    --threads 4
 ```
 
-Options:
+This uses two MPI processes and four OpenMP/FFTW threads per process.
+
+### Full input templates
+
+Before using `step1.in` and `step2.in`, replace `WW`, `HH`, `NN`, `RR`, and
+`xabc` in `step1.in`, and replace `WW` and `HH` in `step2.in`.
+
+Single-host command:
+
+```bash
+../polygr step1 step2 --xyz graphene.xyz --threads 8
+```
+
+Hybrid MPI command:
+
+```bash
+mpirun -np 4 ../polygr_mpi step1 step2 \
+    --xyz graphene.xyz \
+    --threads 12
+```
+
+The provided `slurm/polygr.slm` is a four-node example using one MPI rank and
+48 OpenMP threads per node.
+
+## Options
 
 ```text
 --xyz FILE                 XYZ output path (default: <last-run>.xyz)
 --no-xyz                   Skip coordinate extraction
---threads N                OpenMP and FFTW thread count
+--threads N                OpenMP and FFTW thread count per process
 --pfc-lattice VALUE        PFC lattice constant (default: 7.3)
 --angstrom-lattice VALUE   physical lattice constant in angstrom (default: 2.46)
 ```
 
-## XYZ format
+## MPI data flow
 
-The output is written directly after the final relaxation:
+FFTW-MPI distributes the density field as row slabs. OpenMP handles local
+point-wise loops inside each MPI process. After the final relaxation:
+
+1. each process packs its local real-space rows;
+2. `MPI_Gatherv` restores the global row order on rank 0;
+3. rank 0 runs the shared pure C coordinate extractor;
+4. the final XYZ file is written directly.
+
+Rank 0 must have enough memory for one complete final density field during
+coordinate extraction.
+
+## XYZ format
 
 ```text
 atom_count
@@ -77,10 +135,10 @@ atom_count
 atom_id atom_type x y z
 ```
 
-Atom IDs start at 1, atom type is 1, and `z` is 0. Coordinates are in angstrom.
+Atom IDs start at 1, atom type is 1, `z` is 0, and coordinates are in angstrom.
 
 ## Verification
 
-For the included quick test, the C coordinate extractor and the original
-`coordinator.jar` both produce 52 atoms. The maximum nearest-coordinate
-difference is approximately `6.3e-9` angstrom.
+The Windows quick test produces 52 carbon atoms. The C coordinate extractor
+and the original `coordinator.jar` produce the same atom count, with a maximum
+nearest-coordinate difference of approximately `6.3e-9` angstrom.

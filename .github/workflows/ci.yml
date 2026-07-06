@@ -1,0 +1,40 @@
+name: C build and tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler, MPI, and FFTW
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libfftw3-dev \
+            libfftw3-mpi-dev \
+            libopenmpi-dev \
+            openmpi-bin
+
+      - name: Build single-host and hybrid MPI programs
+        run: |
+          make
+          make mpi
+
+      - name: Run single-host quick test
+        working-directory: example
+        run: |
+          ../polygr quick1 quick2 --xyz quick.xyz --threads 2
+          test "$(head -n 1 quick.xyz)" = "52"
+
+      - name: Run two-rank hybrid MPI quick test
+        working-directory: example
+        run: |
+          mpirun -np 2 ../polygr_mpi quick1 quick2 \
+            --xyz quick-mpi.xyz \
+            --threads 2
+          test "$(head -n 1 quick-mpi.xyz)" -gt 0

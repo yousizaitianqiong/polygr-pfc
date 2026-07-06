@@ -1,6 +1,7 @@
 # Build products and bundled runtime libraries
 polygr
 polygr.exe
+polygr_mpi
 *.dll
 
 # PFC and coordinate output

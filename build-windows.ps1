@@ -8,7 +8,7 @@ if (-not (Test-Path $gcc)) {
 
 $env:PATH = "$(Join-Path $msys 'bin');$env:PATH"
 & $gcc -O3 -std=c11 -Wall -Wextra -fopenmp `
-    -I"$msys\include" "src\polygr.c" `
+    -I"$msys\include" "src\polygr.c" "src\xyz.c" `
     -L"$msys\lib" -lfftw3_omp -lfftw3 -lm `
     -o "polygr.exe"
 if ($LASTEXITCODE -ne 0) {

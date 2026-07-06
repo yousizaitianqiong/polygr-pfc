@@ -1,11 +1,22 @@
-#! /bin/bash
+#!/bin/bash
 
+set -euo pipefail
 
+VERSION=3.3.10
+PREFIX=${PREFIX:-"$HOME/.local/fftw-$VERSION-mpi"}
 
-wget http://www.fftw.org/fftw-3.3.10.tar.gz
-tar -vxf fftw-3.3.10.tar.gz
-cd fftw-3.3.10
-module load mpi/2021.9.0 mkl/2023.1.0
-./configure --enable-mpi --prefix="/home-beegfs/apps/devt/fftw-3.3.10mpi"
-make -j 10
+wget "https://www.fftw.org/fftw-$VERSION.tar.gz"
+tar -xzf "fftw-$VERSION.tar.gz"
+cd "fftw-$VERSION"
+
+./configure \
+    --prefix="$PREFIX" \
+    --enable-mpi \
+    --enable-threads \
+    --enable-openmp \
+    --enable-shared
+
+make -j "${JOBS:-$(nproc)}"
 make install
+
+echo "Installed FFTW MPI/thread libraries in $PREFIX"
