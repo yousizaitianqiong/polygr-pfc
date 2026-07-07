@@ -125,7 +125,9 @@ static int point_compare(const void *left, const void *right) {
 void xyz_write_from_field(const double *source, int width, int height,
                           int field_stride, double dx, double dy,
                           const char *filename, double pfc_lattice,
-                          double angstrom_lattice) {
+                          double angstrom_lattice,
+                          const XyzOptions *options) {
+    (void)options;
     if (source == NULL || filename == NULL || width < 2 || height < 2 ||
         field_stride < width || dx <= 0.0 || dy <= 0.0 ||
         pfc_lattice <= 0.0 || angstrom_lattice <= 0.0) {

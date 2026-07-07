@@ -16,6 +16,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "field_image.h"
 #include "xyz.h"
 
 #define pi 3.14159265358979323846264338327
@@ -662,10 +663,7 @@ static void run_input(const char *name, struct Arrays *arrays,
 	MPI_Barrier(MPI_COMM_WORLD);
 }
 
-static void gather_and_write_xyz(const struct Arrays *arrays,
-							 const struct Relaxation *relaxation,
-							 const char *filename, double pfc_lattice,
-							 double angstrom_lattice) {
+static double *gather_global_field(const struct Arrays *arrays) {
 	int rank;
 	int size;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -674,7 +672,7 @@ static void gather_and_write_xyz(const struct Arrays *arrays,
 	ptrdiff_t global_count_pd = (ptrdiff_t)arrays->H * arrays->W;
 	if(local_count_pd > INT_MAX || global_count_pd > INT_MAX) {
 		if(rank == 0) {
-			fprintf(stderr, "XYZ gather exceeds MPI_Gatherv integer limits.\n");
+			fprintf(stderr, "Field gather exceeds MPI_Gatherv integer limits.\n");
 		}
 		MPI_Abort(MPI_COMM_WORLD, 4);
 	}
@@ -683,7 +681,7 @@ static void gather_and_write_xyz(const struct Arrays *arrays,
 	double *packed = malloc((size_t)(local_count > 0 ? local_count : 1) *
 							sizeof(*packed));
 	if(packed == NULL) {
-		fprintf(stderr, "Rank %d cannot allocate XYZ gather buffer.\n", rank);
+		fprintf(stderr, "Rank %d cannot allocate field gather buffer.\n", rank);
 		MPI_Abort(MPI_COMM_WORLD, 4);
 	}
 #pragma omp parallel for schedule(static)
@@ -704,7 +702,7 @@ static void gather_and_write_xyz(const struct Arrays *arrays,
 		global = malloc((size_t)global_count_pd*sizeof(*global));
 		if(counts == NULL || displacements == NULL || starts == NULL ||
 		   global == NULL) {
-			fprintf(stderr, "Rank 0 cannot allocate the global XYZ field.\n");
+			fprintf(stderr, "Rank 0 cannot allocate the global density field.\n");
 			MPI_Abort(MPI_COMM_WORLD, 4);
 		}
 	}
@@ -727,21 +725,44 @@ static void gather_and_write_xyz(const struct Arrays *arrays,
 				displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 	free(packed);
 
-	if(rank == 0) {
-		xyz_write_from_field(global, arrays->W, arrays->H, arrays->W,
-						 relaxation->dx, relaxation->dy, filename,
-						 pfc_lattice, angstrom_lattice);
-	}
-	free(global);
+	if(rank != 0) global = NULL;
 	free(starts);
 	free(displacements);
 	free(counts);
+	MPI_Barrier(MPI_COMM_WORLD);
+	return global;
+}
+
+static void gather_and_write_outputs(const struct Arrays *arrays,
+							 const struct Relaxation *relaxation,
+							 int write_xyz, const char *xyz_filename,
+							 int write_png, const char *png_filename,
+							 int png_scale,
+							 double pfc_lattice,
+							 double angstrom_lattice) {
+	int rank;
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	double *global = gather_global_field(arrays);
+	if(rank == 0) {
+		if(write_xyz) {
+			xyz_write_from_field(global, arrays->W, arrays->H, arrays->W,
+							 relaxation->dx, relaxation->dy, xyz_filename,
+							 pfc_lattice, angstrom_lattice, NULL);
+		}
+		if(write_png) {
+			field_write_gray_png(global, arrays->W, arrays->H, arrays->W,
+							 png_filename, png_scale);
+		}
+		free(global);
+	}
 	MPI_Barrier(MPI_COMM_WORLD);
 }
 
 static void usage(const char *program) {
 	fprintf(stderr,
 			"Usage: %s RUN [RUN ...] [--xyz FILE] [--threads N]\n"
+			"       [--png FILE] [--no-png]\n"
+			"       [--png-scale N]\n"
 			"       [--pfc-lattice 7.3] [--angstrom-lattice 2.46]\n",
 			program);
 }
@@ -759,9 +780,12 @@ int main(int argc, char **argv) {
 	int run_count = 0;
 	int threads = omp_get_max_threads();
 	int write_xyz = 1;
+	int write_png = 1;
+	int png_scale = 4;
 	double pfc_lattice = 7.3;
 	double angstrom_lattice = 2.46;
 	char xyz_filename[320] = "";
+	char png_filename[320] = "";
 	const char **runs = malloc((size_t)argc*sizeof(*runs));
 	if(runs == NULL) MPI_Abort(MPI_COMM_WORLD, 1);
 	for(int i = 1; i < argc; i++) {
@@ -769,6 +793,13 @@ int main(int argc, char **argv) {
 			snprintf(xyz_filename, sizeof(xyz_filename), "%s", argv[++i]);
 		}
 		else if(strcmp(argv[i], "--no-xyz") == 0) write_xyz = 0;
+		else if(strcmp(argv[i], "--png") == 0 && i+1 < argc) {
+			snprintf(png_filename, sizeof(png_filename), "%s", argv[++i]);
+		}
+		else if(strcmp(argv[i], "--no-png") == 0) write_png = 0;
+		else if(strcmp(argv[i], "--png-scale") == 0 && i+1 < argc) {
+			png_scale = atoi(argv[++i]);
+		}
 		else if(strcmp(argv[i], "--threads") == 0 && i+1 < argc) {
 			threads = atoi(argv[++i]);
 		}
@@ -784,13 +815,18 @@ int main(int argc, char **argv) {
 		}
 		else runs[run_count++] = argv[i];
 	}
-	if(run_count == 0 || threads < 1 || pfc_lattice <= 0.0 ||
+	if(run_count == 0 || threads < 1 || png_scale < 1 ||
+	   pfc_lattice <= 0.0 ||
 	   angstrom_lattice <= 0.0) {
 		if(rank == 0) usage(argv[0]);
 		MPI_Abort(MPI_COMM_WORLD, 1);
 	}
 	if(xyz_filename[0] == '\0') {
 		snprintf(xyz_filename, sizeof(xyz_filename), "%s.xyz",
+				 runs[run_count-1]);
+	}
+	if(png_filename[0] == '\0') {
+		snprintf(png_filename, sizeof(png_filename), "%s.png",
 				 runs[run_count-1]);
 	}
 
@@ -816,9 +852,10 @@ int main(int argc, char **argv) {
 		if(rank == 0) printf("Running %s\n", runs[i]);
 		run_input(runs[i], &arrays, &relaxation);
 	}
-	if(write_xyz) {
-		gather_and_write_xyz(&arrays, &relaxation, xyz_filename, pfc_lattice,
-						 angstrom_lattice);
+	if(write_xyz || write_png) {
+		gather_and_write_outputs(&arrays, &relaxation, write_xyz,
+							 xyz_filename, write_png, png_filename,
+							 png_scale, pfc_lattice, angstrom_lattice);
 	}
 
 	clear_arrays(&arrays);

@@ -2,7 +2,14 @@
 polygr
 polygr.exe
 polygr_mpi
+polygr_cuda
+polygr_cuda.exe
+polygr_figure
+polygr_figure.exe
+polygr_figure_samples
+polygr_figure_samples.exe
 *.dll
+*.log
 
 # PFC and coordinate output
 *.out

@@ -8,9 +8,25 @@ if (-not (Test-Path $gcc)) {
 
 $env:PATH = "$(Join-Path $msys 'bin');$env:PATH"
 & $gcc -O3 -std=c11 -Wall -Wextra -fopenmp `
-    -I"$msys\include" "src\polygr.c" "src\xyz.c" `
+    -I"$msys\include" "src\polygr.c" "src\xyz.c" "src\field_image.c" `
     -L"$msys\lib" -lfftw3_omp -lfftw3 -lm `
     -o "polygr.exe"
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+& $gcc -O3 -std=c11 -Wall -Wextra `
+    -I"$msys\include" "src\figure.c" "src\field_image.c" `
+    -L"$msys\lib" -lm -lgdi32 `
+    -o "polygr_figure.exe"
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+& $gcc -O3 -std=c11 -Wall -Wextra `
+    -I"$msys\include" "src\figure_samples.c" `
+    -L"$msys\lib" -lm `
+    -o "polygr_figure_samples.exe"
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
@@ -26,4 +42,4 @@ foreach ($dll in $runtimeDlls) {
     Copy-Item (Join-Path $msys "bin\$dll") -Destination $dll -Force
 }
 
-Write-Host "Built $PWD\polygr.exe"
+Write-Host "Built $PWD\polygr.exe, $PWD\polygr_figure.exe, and $PWD\polygr_figure_samples.exe"

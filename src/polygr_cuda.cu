@@ -1,19 +1,18 @@
 /*
- * Pure C, shared-memory implementation of the polycrystalline graphene PFC
- * workflow. The phase-field solver uses FFTW threads and OpenMP. The final
- * density field is converted directly to XYZ without the original Java tools.
+ * Single-GPU CUDA/cuFFT implementation of the shared-memory PFC solver path.
+ *
+ * This backend intentionally keeps the time-step loop on the GPU. Host copies
+ * are used for initialization, progress/output files, and box optimization.
  */
 
-#include <fftw3.h>
+#include <cuda_runtime.h>
+#include <cufft.h>
+
 #include <math.h>
-#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#include "field_image.h"
-#include "xyz.h"
 
 #define PI 3.141592653589793238462643383279502884
 
@@ -27,15 +26,18 @@ typedef struct {
     int w;
     int h;
     int wc;
+    int stride;
     size_t real_count;
     size_t complex_count;
+    double *host_q;
+    double *host_p;
     double *linear;
     double *nonlinear;
     double *p;
     double *q;
-    fftw_plan p_forward;
-    fftw_plan q_forward;
-    fftw_plan q_inverse;
+    cufftHandle p_forward;
+    cufftHandle q_forward;
+    cufftHandle q_inverse;
 } Arrays;
 
 typedef struct {
@@ -64,12 +66,104 @@ static void die(const char *message) {
     exit(EXIT_FAILURE);
 }
 
+static void check_cuda(cudaError_t status, const char *where) {
+    if (status != cudaSuccess) {
+        fprintf(stderr, "%s: %s\n", where, cudaGetErrorString(status));
+        exit(EXIT_FAILURE);
+    }
+}
+
+static void check_cufft(cufftResult status, const char *where) {
+    if (status != CUFFT_SUCCESS) {
+        fprintf(stderr, "%s: cuFFT status %d\n", where, (int)status);
+        exit(EXIT_FAILURE);
+    }
+}
+
 static void *checked_malloc(size_t bytes) {
     void *ptr = malloc(bytes);
-    if (ptr == NULL) {
-        die("Out of memory.");
-    }
+    if (ptr == NULL) die("Out of memory.");
     return ptr;
+}
+
+__global__ static void update_operators_kernel(
+    double *linear_out, double *nonlinear_out, int w, int h, int wc,
+    double alpha, double beta, double conserved, double dx, double dy,
+    double dt) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t count = (size_t)h * wc;
+    if (i >= count) return;
+    int y = (int)(i / wc);
+    int x = (int)(i - (size_t)y * wc);
+    double dkx = 2.0 * PI / (dx * w);
+    double dky = 2.0 * PI / (dy * h);
+    double kx = x * dkx;
+    double ky = (y < h / 2 ? y : y - h) * dky;
+    double k2 = kx * kx + ky * ky;
+    double one_minus_k2 = 1.0 - k2;
+    double linear = alpha + beta * one_minus_k2 * one_minus_k2;
+    double mobility = (1.0 - conserved) + conserved * k2;
+    double exponential = exp(-mobility * linear * dt);
+    double inv_size = 1.0 / ((double)w * h);
+    linear_out[i] = exponential;
+    nonlinear_out[i] =
+        (linear == 0.0 ? -mobility * dt : (exponential - 1.0) / linear) *
+        inv_size;
+}
+
+__global__ static void scale_complex_kernel(cufftDoubleComplex *data,
+                                            size_t count, double scale) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    data[i].x *= scale;
+    data[i].y *= scale;
+}
+
+__global__ static void nonlinear_kernel(double *q, int w, int h, int stride,
+                                        double gamma, double delta) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t count = (size_t)w * h;
+    if (i >= count) return;
+    int y = (int)(i / w);
+    int x = (int)(i - (size_t)y * w);
+    size_t index = (size_t)y * stride + x;
+    double value = q[index];
+    q[index] = gamma * value * value + delta * value * value * value;
+}
+
+__global__ static void frequency_update_kernel(
+    cufftDoubleComplex *p, cufftDoubleComplex *q, const double *linear,
+    const double *nonlinear, size_t count) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    double real = linear[i] * p[i].x + nonlinear[i] * q[i].x;
+    double imag = linear[i] * p[i].y + nonlinear[i] * q[i].y;
+    p[i].x = real;
+    p[i].y = imag;
+    q[i].x = real;
+    q[i].y = imag;
+}
+
+__global__ static void spectral_factor_kernel(cufftDoubleComplex *q, int w,
+                                              int h, int wc, double dx,
+                                              double dy) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t count = (size_t)h * wc;
+    if (i >= count) return;
+    int y = (int)(i / wc);
+    int x = (int)(i - (size_t)y * wc);
+    double dkx = 2.0 * PI / (dx * w);
+    double dky = 2.0 * PI / (dy * h);
+    double kx = x * dkx;
+    double ky = (y < h / 2 ? y : y - h) * dky;
+    double factor = 1.0 - kx * kx - ky * ky;
+    factor *= factor;
+    q[i].x *= factor;
+    q[i].y *= factor;
+}
+
+static int blocks_for(size_t count) {
+    return (int)((count + 255) / 256);
 }
 
 static void configure_arrays(Arrays *arrays, FILE *input) {
@@ -77,45 +171,39 @@ static void configure_arrays(Arrays *arrays, FILE *input) {
         arrays->w < 2 || arrays->h < 2) {
         die("Invalid array dimensions.");
     }
-
     arrays->wc = arrays->w / 2 + 1;
-    arrays->real_count = (size_t)arrays->h * (size_t)(2 * arrays->wc);
-    arrays->complex_count = (size_t)arrays->h * (size_t)arrays->wc;
-    arrays->linear = fftw_alloc_real(arrays->complex_count);
-    arrays->nonlinear = fftw_alloc_real(arrays->complex_count);
-    arrays->p = fftw_alloc_real(arrays->real_count);
-    arrays->q = fftw_alloc_real(arrays->real_count);
-    if (!arrays->linear || !arrays->nonlinear || !arrays->p || !arrays->q) {
-        die("FFTW allocation failed.");
-    }
-
-    arrays->p_forward = fftw_plan_dft_r2c_2d(
-        arrays->h, arrays->w, arrays->p, (fftw_complex *)arrays->p, FFTW_MEASURE);
-    arrays->q_forward = fftw_plan_dft_r2c_2d(
-        arrays->h, arrays->w, arrays->q, (fftw_complex *)arrays->q, FFTW_MEASURE);
-    arrays->q_inverse = fftw_plan_dft_c2r_2d(
-        arrays->h, arrays->w, (fftw_complex *)arrays->q, arrays->q, FFTW_MEASURE);
-    if (!arrays->p_forward || !arrays->q_forward || !arrays->q_inverse) {
-        die("FFTW plan creation failed.");
-    }
+    arrays->stride = 2 * arrays->wc;
+    arrays->real_count = (size_t)arrays->h * arrays->stride;
+    arrays->complex_count = (size_t)arrays->h * arrays->wc;
+    arrays->host_q = (double *)checked_malloc(arrays->real_count * sizeof(double));
+    arrays->host_p = (double *)checked_malloc(arrays->real_count * sizeof(double));
+    memset(arrays->host_q, 0, arrays->real_count * sizeof(double));
+    memset(arrays->host_p, 0, arrays->real_count * sizeof(double));
+    check_cuda(cudaMalloc(&arrays->linear, arrays->complex_count * sizeof(double)), "cudaMalloc linear");
+    check_cuda(cudaMalloc(&arrays->nonlinear, arrays->complex_count * sizeof(double)), "cudaMalloc nonlinear");
+    check_cuda(cudaMalloc(&arrays->p, arrays->real_count * sizeof(double)), "cudaMalloc p");
+    check_cuda(cudaMalloc(&arrays->q, arrays->real_count * sizeof(double)), "cudaMalloc q");
+    check_cufft(cufftPlan2d(&arrays->p_forward, arrays->h, arrays->w, CUFFT_D2Z), "cufftPlan2d p_forward");
+    check_cufft(cufftPlan2d(&arrays->q_forward, arrays->h, arrays->w, CUFFT_D2Z), "cufftPlan2d q_forward");
+    check_cufft(cufftPlan2d(&arrays->q_inverse, arrays->h, arrays->w, CUFFT_Z2D), "cufftPlan2d q_inverse");
 }
 
 static void clear_arrays(Arrays *arrays) {
-    fftw_destroy_plan(arrays->p_forward);
-    fftw_destroy_plan(arrays->q_forward);
-    fftw_destroy_plan(arrays->q_inverse);
-    fftw_free(arrays->p);
-    fftw_free(arrays->q);
-    fftw_free(arrays->linear);
-    fftw_free(arrays->nonlinear);
+    if (arrays->p_forward) cufftDestroy(arrays->p_forward);
+    if (arrays->q_forward) cufftDestroy(arrays->q_forward);
+    if (arrays->q_inverse) cufftDestroy(arrays->q_inverse);
+    cudaFree(arrays->p);
+    cudaFree(arrays->q);
+    cudaFree(arrays->linear);
+    cudaFree(arrays->nonlinear);
+    free(arrays->host_q);
+    free(arrays->host_p);
     memset(arrays, 0, sizeof(*arrays));
 }
 
 static void seed_rng(FILE *input) {
     unsigned int seed;
-    if (fscanf(input, " %u", &seed) != 1) {
-        die("Invalid random seed.");
-    }
+    if (fscanf(input, " %u", &seed) != 1) die("Invalid random seed.");
     srand(seed == 0 ? (unsigned int)time(NULL) : seed);
 }
 
@@ -153,10 +241,9 @@ static double one_mode(double x0, double y0, double lattice, double theta) {
 }
 
 static void random_state(Arrays *arrays, double density, double amplitude) {
-    int stride = 2 * arrays->wc;
     for (int y = 0; y < arrays->h; ++y) {
         for (int x = 0; x < arrays->w; ++x) {
-            arrays->q[(size_t)y * stride + x] =
+            arrays->host_q[(size_t)y * arrays->stride + x] =
                 density + amplitude * ((double)rand() / RAND_MAX - 0.5);
         }
     }
@@ -166,20 +253,14 @@ static void polycrystalline_state(Arrays *arrays, double dx, double dy,
                                   double lattice, double density,
                                   double amplitude, int grain_count,
                                   double radius) {
-    if (grain_count <= 0 || radius <= 0.0) {
-        die("Invalid polycrystalline initialization.");
-    }
-    double *grains =
-        checked_malloc((size_t)grain_count * 3 * sizeof(*grains));
+    if (grain_count <= 0 || radius <= 0.0) die("Invalid polycrystalline initialization.");
+    double *grains = (double *)checked_malloc((size_t)grain_count * 3 * sizeof(double));
     for (int grain = 0; grain < grain_count; ++grain) {
         grains[3 * grain] = (double)rand() / RAND_MAX * arrays->w;
         grains[3 * grain + 1] = (double)rand() / RAND_MAX * arrays->h;
         grains[3 * grain + 2] = 2.0 * PI * rand() / RAND_MAX;
     }
-
-    int stride = 2 * arrays->wc;
     double divisor = 0.5 / (radius * radius * lattice * lattice);
-#pragma omp parallel for schedule(static)
     for (int y = 0; y < arrays->h; ++y) {
         for (int x = 0; x < arrays->w; ++x) {
             int closest = 0;
@@ -203,7 +284,7 @@ static void polycrystalline_state(Arrays *arrays, double dx, double dy,
                     closest_y = ry;
                 }
             }
-            arrays->q[(size_t)y * stride + x] =
+            arrays->host_q[(size_t)y * arrays->stride + x] =
                 density + amplitude * exp(-closest_r2 * divisor) *
                               one_mode(closest_x, closest_y, lattice,
                                        grains[3 * closest + 2]);
@@ -214,17 +295,14 @@ static void polycrystalline_state(Arrays *arrays, double dx, double dy,
 
 static void read_state(Arrays *arrays, FILE *file, double density,
                        double amplitude) {
-    int stride = 2 * arrays->wc;
     double mean = 0.0;
     double minimum = HUGE_VAL;
     double maximum = -HUGE_VAL;
     for (int y = 0; y < arrays->h; ++y) {
         for (int x = 0; x < arrays->w; ++x) {
             double value;
-            if (fscanf(file, "%lf", &value) != 1) {
-                die("Invalid state data.");
-            }
-            arrays->q[(size_t)y * stride + x] = value;
+            if (fscanf(file, "%lf", &value) != 1) die("Invalid state data.");
+            arrays->host_q[(size_t)y * arrays->stride + x] = value;
             mean += value;
             if (value < minimum) minimum = value;
             if (value > maximum) maximum = value;
@@ -232,29 +310,22 @@ static void read_state(Arrays *arrays, FILE *file, double density,
     }
     mean /= (double)arrays->w * arrays->h;
     double range = maximum - minimum;
-    if (range == 0.0) {
-        die("Cannot normalize a constant input state.");
-    }
-#pragma omp parallel for schedule(static)
+    if (range == 0.0) die("Cannot normalize a constant input state.");
     for (int y = 0; y < arrays->h; ++y) {
         for (int x = 0; x < arrays->w; ++x) {
-            size_t index = (size_t)y * stride + x;
-            arrays->q[index] =
-                (arrays->q[index] - mean) / range * amplitude + density;
+            size_t index = (size_t)y * arrays->stride + x;
+            arrays->host_q[index] =
+                (arrays->host_q[index] - mean) / range * amplitude + density;
         }
     }
 }
 
 static void initialize_system(Arrays *arrays, FILE *input) {
     int type;
-    if (fscanf(input, " %d", &type) != 1) {
-        die("Invalid initialization type.");
-    }
+    if (fscanf(input, " %d", &type) != 1) die("Invalid initialization type.");
     if (type == 0) {
         double density, amplitude;
-        if (fscanf(input, " %lf %lf", &density, &amplitude) != 2) {
-            die("Invalid random initialization.");
-        }
+        if (fscanf(input, " %lf %lf", &density, &amplitude) != 2) die("Invalid random initialization.");
         random_state(arrays, density, amplitude);
     } else if (type == 1) {
         int grains;
@@ -268,8 +339,7 @@ static void initialize_system(Arrays *arrays, FILE *input) {
     } else if (type == 2) {
         char filename[256];
         double density, amplitude;
-        if (fscanf(input, " %255s %lf %lf", filename, &density, &amplitude) !=
-            3) {
+        if (fscanf(input, " %255s %lf %lf", filename, &density, &amplitude) != 3) {
             die("Invalid file initialization.");
         }
         FILE *state = fopen(filename, "r");
@@ -282,127 +352,132 @@ static void initialize_system(Arrays *arrays, FILE *input) {
     } else {
         die("Unknown initialization type.");
     }
+    check_cuda(cudaMemcpy(arrays->q, arrays->host_q,
+                          arrays->real_count * sizeof(double),
+                          cudaMemcpyHostToDevice), "copy initial q");
 }
 
 static void update_operators(Arrays *arrays, const Model *model,
                              const Relaxation *relaxation) {
-    double inv_size = 1.0 / ((double)arrays->w * arrays->h);
-    double dkx = 2.0 * PI / (relaxation->dx * arrays->w);
-    double dky = 2.0 * PI / (relaxation->dy * arrays->h);
-#pragma omp parallel for collapse(2) schedule(static)
-    for (int y = 0; y < arrays->h; ++y) {
-        for (int x = 0; x < arrays->wc; ++x) {
-            double kx = x * dkx;
-            double ky = (y < arrays->h / 2 ? y : y - arrays->h) * dky;
-            double k2 = kx * kx + ky * ky;
-            double one_minus_k2 = 1.0 - k2;
-            double linear =
-                model->alpha + model->beta * one_minus_k2 * one_minus_k2;
-            double mobility = (1.0 - model->conserved) +
-                              model->conserved * k2;
-            double exponential = exp(-mobility * linear * relaxation->dt);
-            size_t index = (size_t)y * arrays->wc + x;
-            arrays->linear[index] = exponential;
-            arrays->nonlinear[index] =
-                (linear == 0.0 ? -mobility * relaxation->dt
-                               : (exponential - 1.0) / linear) *
-                inv_size;
-        }
-    }
+    update_operators_kernel<<<blocks_for(arrays->complex_count), 256>>>(
+        arrays->linear, arrays->nonlinear, arrays->w, arrays->h, arrays->wc,
+        model->alpha, model->beta, model->conserved, relaxation->dx,
+        relaxation->dy, relaxation->dt);
+    check_cuda(cudaGetLastError(), "update_operators_kernel");
 }
 
 static void scale_complex(double *data, size_t count, double scale) {
-    fftw_complex *complex_data = (fftw_complex *)data;
-#pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < count; ++i) {
-        complex_data[i][0] *= scale;
-        complex_data[i][1] *= scale;
-    }
+    scale_complex_kernel<<<blocks_for(count), 256>>>((cufftDoubleComplex *)data,
+                                                     count, scale);
+    check_cuda(cudaGetLastError(), "scale_complex_kernel");
 }
 
 static void calculate_properties(Arrays *arrays, const Model *model,
                                  Relaxation *relaxation) {
-    int stride = 2 * arrays->wc;
-    memcpy(arrays->p, arrays->q, arrays->real_count * sizeof(*arrays->q));
-    fftw_execute(arrays->q_forward);
+    check_cuda(cudaMemcpy(arrays->p, arrays->q,
+                          arrays->real_count * sizeof(double),
+                          cudaMemcpyDeviceToDevice), "copy q to p");
+    check_cufft(cufftExecD2Z(arrays->q_forward, arrays->q,
+                             (cufftDoubleComplex *)arrays->q), "q_forward");
     scale_complex(arrays->q, arrays->complex_count,
                   1.0 / ((double)arrays->w * arrays->h));
-
-    double dkx = 2.0 * PI / (relaxation->dx * arrays->w);
-    double dky = 2.0 * PI / (relaxation->dy * arrays->h);
-    fftw_complex *q_frequency = (fftw_complex *)arrays->q;
-#pragma omp parallel for collapse(2) schedule(static)
-    for (int y = 0; y < arrays->h; ++y) {
-        for (int x = 0; x < arrays->wc; ++x) {
-            double kx = x * dkx;
-            double ky = (y < arrays->h / 2 ? y : y - arrays->h) * dky;
-            double factor = 1.0 - kx * kx - ky * ky;
-            factor *= factor;
-            size_t index = (size_t)y * arrays->wc + x;
-            q_frequency[index][0] *= factor;
-            q_frequency[index][1] *= factor;
-        }
-    }
-    fftw_execute(arrays->q_inverse);
+    spectral_factor_kernel<<<blocks_for(arrays->complex_count), 256>>>(
+        (cufftDoubleComplex *)arrays->q, arrays->w, arrays->h, arrays->wc,
+        relaxation->dx, relaxation->dy);
+    check_cuda(cudaGetLastError(), "spectral_factor_kernel");
+    check_cufft(cufftExecZ2D(arrays->q_inverse,
+                             (cufftDoubleComplex *)arrays->q, arrays->q),
+                "q_inverse properties");
+    check_cuda(cudaMemcpy(arrays->host_p, arrays->p,
+                          arrays->real_count * sizeof(double),
+                          cudaMemcpyDeviceToHost), "copy p host");
+    check_cuda(cudaMemcpy(arrays->host_q, arrays->q,
+                          arrays->real_count * sizeof(double),
+                          cudaMemcpyDeviceToHost), "copy q host");
 
     double free_energy = 0.0;
     double density = 0.0;
-#pragma omp parallel for reduction(+ : free_energy, density) schedule(static)
     for (int y = 0; y < arrays->h; ++y) {
         for (int x = 0; x < arrays->w; ++x) {
-            size_t index = (size_t)y * stride + x;
-            double p = arrays->p[index];
+            size_t index = (size_t)y * arrays->stride + x;
+            double p = arrays->host_p[index];
             double p2 = p * p;
             free_energy +=
                 0.5 * (model->alpha * p2 +
-                       model->beta * p * arrays->q[index]) +
+                       model->beta * p * arrays->host_q[index]) +
                 model->gamma * p * p2 / 3.0 +
                 0.25 * model->delta * p2 * p2;
             density += p;
-            arrays->q[index] = p;
+            arrays->host_q[index] = p;
         }
     }
     double inv_size = 1.0 / ((double)arrays->w * arrays->h);
     relaxation->free_energy = free_energy * inv_size;
     relaxation->density = density * inv_size;
-    fftw_execute(arrays->p_forward);
+    check_cuda(cudaMemcpy(arrays->q, arrays->host_q,
+                          arrays->real_count * sizeof(double),
+                          cudaMemcpyHostToDevice), "restore q");
+    check_cufft(cufftExecD2Z(arrays->p_forward, arrays->p,
+                             (cufftDoubleComplex *)arrays->p), "p_forward");
     scale_complex(arrays->p, arrays->complex_count, inv_size);
 }
 
 static void solver_step(Arrays *arrays, const Model *model,
                         const Relaxation *relaxation) {
-    int stride = 2 * arrays->wc;
     if (relaxation->step % 100 == 0) {
-        memcpy(arrays->p, arrays->q, arrays->real_count * sizeof(*arrays->q));
-        fftw_execute(arrays->p_forward);
+        check_cuda(cudaMemcpy(arrays->p, arrays->q,
+                              arrays->real_count * sizeof(double),
+                              cudaMemcpyDeviceToDevice), "solver copy q to p");
+        check_cufft(cufftExecD2Z(arrays->p_forward, arrays->p,
+                                 (cufftDoubleComplex *)arrays->p), "solver p_forward");
         scale_complex(arrays->p, arrays->complex_count,
                       1.0 / ((double)arrays->w * arrays->h));
     }
+    nonlinear_kernel<<<blocks_for((size_t)arrays->w * arrays->h), 256>>>(
+        arrays->q, arrays->w, arrays->h, arrays->stride, model->gamma,
+        model->delta);
+    check_cuda(cudaGetLastError(), "nonlinear_kernel");
+    check_cufft(cufftExecD2Z(arrays->q_forward, arrays->q,
+                             (cufftDoubleComplex *)arrays->q), "solver q_forward");
+    frequency_update_kernel<<<blocks_for(arrays->complex_count), 256>>>(
+        (cufftDoubleComplex *)arrays->p, (cufftDoubleComplex *)arrays->q,
+        arrays->linear, arrays->nonlinear, arrays->complex_count);
+    check_cuda(cudaGetLastError(), "frequency_update_kernel");
+    check_cufft(cufftExecZ2D(arrays->q_inverse,
+                             (cufftDoubleComplex *)arrays->q, arrays->q),
+                "solver q_inverse");
+}
 
-#pragma omp parallel for schedule(static)
+static void write_state(Arrays *arrays, const Relaxation *relaxation,
+                        const Output *output) {
+    check_cuda(cudaMemcpy(arrays->host_q, arrays->q,
+                          arrays->real_count * sizeof(double),
+                          cudaMemcpyDeviceToHost), "copy state host");
+    char filename[320];
+    snprintf(filename, sizeof(filename), "%s-t-%d.dat", output->name,
+             relaxation->step);
+    FILE *file = fopen(filename, "w");
+    if (file == NULL) die("Unable to write state file.");
     for (int y = 0; y < arrays->h; ++y) {
         for (int x = 0; x < arrays->w; ++x) {
-            size_t index = (size_t)y * stride + x;
-            double value = arrays->q[index];
-            arrays->q[index] =
-                model->gamma * value * value +
-                model->delta * value * value * value;
+            fprintf(file, "%.9e\n", arrays->host_q[(size_t)y * arrays->stride + x]);
         }
     }
-    fftw_execute(arrays->q_forward);
+    fclose(file);
+}
 
-    fftw_complex *p_frequency = (fftw_complex *)arrays->p;
-    fftw_complex *q_frequency = (fftw_complex *)arrays->q;
-#pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < arrays->complex_count; ++i) {
-        p_frequency[i][0] = arrays->linear[i] * p_frequency[i][0] +
-                            arrays->nonlinear[i] * q_frequency[i][0];
-        p_frequency[i][1] = arrays->linear[i] * p_frequency[i][1] +
-                            arrays->nonlinear[i] * q_frequency[i][1];
-        q_frequency[i][0] = p_frequency[i][0];
-        q_frequency[i][1] = p_frequency[i][1];
-    }
-    fftw_execute(arrays->q_inverse);
+static void print_status(const Relaxation *relaxation, const Output *output) {
+    printf("%d %lld %.9f %.9f %.9f %.9f\n", relaxation->step,
+           (long long)(time(NULL) - relaxation->started), relaxation->dx,
+           relaxation->dy, relaxation->free_energy, relaxation->density);
+    char filename[320];
+    snprintf(filename, sizeof(filename), "%s.out", output->name);
+    FILE *file = fopen(filename, "a");
+    if (file == NULL) die("Unable to write progress output.");
+    fprintf(file, "%d %lld %.9f %.9f %.9f %.9f\n", relaxation->step,
+            (long long)(time(NULL) - relaxation->started), relaxation->dx,
+            relaxation->dy, relaxation->free_energy, relaxation->density);
+    fclose(file);
 }
 
 static void optimize_box(Arrays *arrays, const Model *model,
@@ -419,7 +494,6 @@ static void optimize_box(Arrays *arrays, const Model *model,
         calculate_properties(arrays, model, relaxation);
         energies[i] = relaxation->free_energy;
     }
-
     double x_denominator = 2.0 * (energies[1] - 2.0 * energies[0] + energies[2]);
     double y_denominator = 2.0 * (energies[3] - 2.0 * energies[0] + energies[4]);
     relaxation->dx =
@@ -434,7 +508,6 @@ static void optimize_box(Arrays *arrays, const Model *model,
             : (d * (energies[3] - energies[4]) +
                2.0 * dy0 * (-2.0 * energies[0] + energies[3] + energies[4])) /
                   y_denominator;
-
     double dw = arrays->w * (relaxation->dx - dx0);
     double dh = arrays->h * (relaxation->dy - dy0);
     double change = hypot(dw, dh);
@@ -445,46 +518,9 @@ static void optimize_box(Arrays *arrays, const Model *model,
         relaxation->dy = ratio * relaxation->dy + (1.0 - ratio) * dy0;
     }
     update_operators(arrays, model, relaxation);
-
     double dd = hypot(relaxation->dx - dx0, relaxation->dy - dy0);
     relaxation->sample_step *= dd < d ? 0.5 : 2.0;
-    if (relaxation->sample_step < 1e-6) {
-        relaxation->sample_step *= 2.0;
-    }
-}
-
-static void write_state(const Arrays *arrays, const Relaxation *relaxation,
-                        const Output *output) {
-    char filename[320];
-    snprintf(filename, sizeof(filename), "%s-t-%d.dat", output->name,
-             relaxation->step);
-    FILE *file = fopen(filename, "w");
-    if (file == NULL) {
-        die("Unable to write state file.");
-    }
-    int stride = 2 * arrays->wc;
-    for (int y = 0; y < arrays->h; ++y) {
-        for (int x = 0; x < arrays->w; ++x) {
-            fprintf(file, "%.9e\n", arrays->q[(size_t)y * stride + x]);
-        }
-    }
-    fclose(file);
-}
-
-static void print_status(const Relaxation *relaxation, const Output *output) {
-    printf("%d %lld %.9f %.9f %.9f %.9f\n", relaxation->step,
-           (long long)(time(NULL) - relaxation->started), relaxation->dx,
-           relaxation->dy, relaxation->free_energy, relaxation->density);
-    char filename[320];
-    snprintf(filename, sizeof(filename), "%s.out", output->name);
-    FILE *file = fopen(filename, "a");
-    if (file == NULL) {
-        die("Unable to write progress output.");
-    }
-    fprintf(file, "%d %lld %.9f %.9f %.9f %.9f\n", relaxation->step,
-            (long long)(time(NULL) - relaxation->started), relaxation->dx,
-            relaxation->dy, relaxation->free_energy, relaxation->density);
-    fclose(file);
+    if (relaxation->sample_step < 1e-6) relaxation->sample_step *= 2.0;
 }
 
 static void relax_system(Arrays *arrays, const Model *model,
@@ -516,7 +552,6 @@ static void run_input(const char *name, Arrays *arrays, Relaxation *relaxation) 
         fprintf(stderr, "Input file not found: %s\n", filename);
         exit(EXIT_FAILURE);
     }
-
     Output output = {0};
     Model model = {0};
     memset(arrays, 0, sizeof(*arrays));
@@ -559,12 +594,9 @@ static void run_input(const char *name, Arrays *arrays, Relaxation *relaxation) 
 
 static void usage(const char *program) {
     fprintf(stderr,
-            "Usage: %s RUN [RUN ...] [--xyz FILE] [--threads N]\n"
-            "       [--png FILE] [--no-png]\n"
-            "       [--png-scale N]\n"
-            "       [--pfc-lattice 7.3] [--angstrom-lattice 2.46]\n"
-            "Example: %s step1 step2 --xyz graphene.xyz --threads 8\n",
-            program, program);
+            "Usage: %s RUN [RUN ...] [--no-xyz] [--no-png]\n"
+            "CUDA backend currently writes .out and .dat state files only.\n",
+            program);
 }
 
 int main(int argc, char **argv) {
@@ -572,35 +604,24 @@ int main(int argc, char **argv) {
         usage(argv[0]);
         return EXIT_FAILURE;
     }
-
-    int run_count = 0;
-    int threads = omp_get_max_threads();
+    int device = 0;
     int write_xyz = 1;
     int write_png = 1;
-    int png_scale = 4;
-    char xyz_filename[320] = "";
-    char png_filename[320] = "";
-    double pfc_lattice = 7.3;
-    double angstrom_lattice = 2.46;
-    const char **runs = checked_malloc((size_t)argc * sizeof(*runs));
+    int run_count = 0;
+    const char **runs = (const char **)checked_malloc((size_t)argc * sizeof(char *));
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--xyz") == 0 && i + 1 < argc) {
-            snprintf(xyz_filename, sizeof(xyz_filename), "%s", argv[++i]);
+        if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
+            device = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-xyz") == 0) {
             write_xyz = 0;
-        } else if (strcmp(argv[i], "--png") == 0 && i + 1 < argc) {
-            snprintf(png_filename, sizeof(png_filename), "%s", argv[++i]);
         } else if (strcmp(argv[i], "--no-png") == 0) {
             write_png = 0;
-        } else if (strcmp(argv[i], "--png-scale") == 0 && i + 1 < argc) {
-            png_scale = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
-            threads = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--pfc-lattice") == 0 && i + 1 < argc) {
-            pfc_lattice = atof(argv[++i]);
-        } else if (strcmp(argv[i], "--angstrom-lattice") == 0 &&
-                   i + 1 < argc) {
-            angstrom_lattice = atof(argv[++i]);
+        } else if (strcmp(argv[i], "--xyz") == 0 || strcmp(argv[i], "--png") == 0 ||
+                   strcmp(argv[i], "--threads") == 0 ||
+                   strcmp(argv[i], "--png-scale") == 0 ||
+                   strcmp(argv[i], "--pfc-lattice") == 0 ||
+                   strcmp(argv[i], "--angstrom-lattice") == 0) {
+            ++i;
         } else if (argv[i][0] == '-') {
             usage(argv[0]);
             free(runs);
@@ -609,28 +630,20 @@ int main(int argc, char **argv) {
             runs[run_count++] = argv[i];
         }
     }
-    if (run_count == 0 || threads < 1 || png_scale < 1 ||
-        pfc_lattice <= 0.0 ||
-        angstrom_lattice <= 0.0) {
+    if (run_count == 0) {
         usage(argv[0]);
         free(runs);
         return EXIT_FAILURE;
     }
-    if (xyz_filename[0] == '\0') {
-        snprintf(xyz_filename, sizeof(xyz_filename), "%s.xyz",
-                 runs[run_count - 1]);
+    if (write_xyz || write_png) {
+        fprintf(stderr, "polygr_cuda currently supports solver validation only; pass --no-xyz --no-png.\n");
+        free(runs);
+        return EXIT_FAILURE;
     }
-    if (png_filename[0] == '\0') {
-        snprintf(png_filename, sizeof(png_filename), "%s.png",
-                 runs[run_count - 1]);
-    }
-
-    omp_set_num_threads(threads);
-    if (!fftw_init_threads()) {
-        die("Unable to initialize FFTW threads.");
-    }
-    fftw_plan_with_nthreads(threads);
-    printf("Using %d OpenMP/FFTW threads\n", threads);
+    check_cuda(cudaSetDevice(device), "cudaSetDevice");
+    cudaDeviceProp prop;
+    check_cuda(cudaGetDeviceProperties(&prop, device), "cudaGetDeviceProperties");
+    printf("Using CUDA device %d: %s\n", device, prop.name);
 
     Arrays arrays = {0};
     Relaxation relaxation = {0};
@@ -639,17 +652,7 @@ int main(int argc, char **argv) {
         printf("Running %s\n", runs[i]);
         run_input(runs[i], &arrays, &relaxation);
     }
-    if (write_xyz) {
-        xyz_write_from_field(arrays.q, arrays.w, arrays.h, 2 * arrays.wc,
-                             relaxation.dx, relaxation.dy, xyz_filename,
-                             pfc_lattice, angstrom_lattice, NULL);
-    }
-    if (write_png) {
-        field_write_gray_png(arrays.q, arrays.w, arrays.h, 2 * arrays.wc,
-                             png_filename, png_scale);
-    }
     clear_arrays(&arrays);
-    fftw_cleanup_threads();
     free(runs);
     return EXIT_SUCCESS;
 }

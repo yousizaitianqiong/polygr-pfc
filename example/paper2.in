@@ -1,0 +1,7 @@
+# Reload, relax, and emit a denser nc-graphene example
+S 34789847
+O 100 200
+A 288 192
+I 2 paper1-t-400.dat -0.072 0.1
+M -0.15 1.0 0.87 1.0 0
+R 400 0.7 0.7 1.0 100
