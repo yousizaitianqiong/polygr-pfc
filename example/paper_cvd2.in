@@ -1,0 +1,7 @@
+# Reload and relax the CVD growth field for the final orientation map
+S 34789847
+O 50 50
+A 288 192
+I 2 paper_cvd1-t-350.dat -0.072 0.1
+M -0.15 1.0 0.87 1.0 0
+R 300 0.7 0.7 1.0 100
