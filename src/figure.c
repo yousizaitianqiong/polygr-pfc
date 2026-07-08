@@ -91,6 +91,61 @@ static void pixel(Canvas *canvas, int x, int y, int r, int g, int b) {
     p[2] = (unsigned char)b;
 }
 
+static void blend_pixel(Canvas *canvas, int x, int y, int r, int g, int b,
+                        double alpha) {
+    if (x < 0 || y < 0 || x >= canvas->width || y >= canvas->height) return;
+    if (alpha <= 0.0) return;
+    if (alpha > 1.0) alpha = 1.0;
+    unsigned char *p = canvas->rgb + ((size_t)y * canvas->width + x) * 3;
+    p[0] = (unsigned char)(p[0] * (1.0 - alpha) + r * alpha + 0.5);
+    p[1] = (unsigned char)(p[1] * (1.0 - alpha) + g * alpha + 0.5);
+    p[2] = (unsigned char)(p[2] * (1.0 - alpha) + b * alpha + 0.5);
+}
+
+static void soft_point(Canvas *canvas, double x, double y, int r, int g, int b,
+                       double alpha) {
+    int ix = (int)floor(x);
+    int iy = (int)floor(y);
+    for (int oy = -1; oy <= 1; ++oy) {
+        for (int ox = -1; ox <= 1; ++ox) {
+            double dx = x - (ix + ox);
+            double dy = y - (iy + oy);
+            double w = exp(-(dx * dx + dy * dy) / 0.42);
+            blend_pixel(canvas, ix + ox, iy + oy, r, g, b, alpha * w);
+        }
+    }
+}
+
+static void UNUSED_FUNCTION soft_line(Canvas *canvas, double x0, double y0,
+                                      double x1, double y1, int r, int g,
+                                      int b, double alpha) {
+    double dx = x1 - x0;
+    double dy = y1 - y0;
+    int steps = (int)(sqrt(dx * dx + dy * dy) * 1.8) + 1;
+    for (int i = 0; i <= steps; ++i) {
+        double t = steps == 0 ? 0.0 : (double)i / steps;
+        soft_point(canvas, x0 + dx * t, y0 + dy * t, r, g, b, alpha);
+    }
+}
+
+static void UNUSED_FUNCTION soft_line_rect(Canvas *canvas, double x0, double y0,
+                                           double x1, double y1, int left,
+                                           int top, int width, int height,
+                                           int r, int g, int b,
+                                           double alpha) {
+    double dx = x1 - x0;
+    double dy = y1 - y0;
+    int steps = (int)(sqrt(dx * dx + dy * dy) * 1.8) + 1;
+    for (int i = 0; i <= steps; ++i) {
+        double t = steps == 0 ? 0.0 : (double)i / steps;
+        double x = x0 + dx * t;
+        double y = y0 + dy * t;
+        if (x >= left && x <= left + width && y >= top && y <= top + height) {
+            soft_point(canvas, x, y, r, g, b, alpha);
+        }
+    }
+}
+
 static void rect(Canvas *canvas, int x, int y, int w, int h, int r, int g,
                  int b) {
     for (int yy = y; yy < y + h; ++yy) {
@@ -439,7 +494,7 @@ static double scene_rand(unsigned int *state) {
     return (double)(*state >> 8) / 16777215.0;
 }
 
-static Scene scene_create(int width, int height, int count) {
+static Scene UNUSED_FUNCTION scene_create(int width, int height, int count) {
     Scene scene = {width, height, count,
                    xmalloc((size_t)count * sizeof(*scene.grains))};
     int cols = (int)ceil(sqrt((double)count * width / height));
@@ -463,7 +518,7 @@ static Scene scene_create(int width, int height, int count) {
     return scene;
 }
 
-static void scene_free(Scene *scene) {
+static void UNUSED_FUNCTION scene_free(Scene *scene) {
     free(scene->grains);
     memset(scene, 0, sizeof(*scene));
 }
@@ -544,8 +599,10 @@ static double scene_growth_radius(const Scene *scene, int id, double x,
     return base_radius * scene->grains[id].bias * wobble;
 }
 
-static void render_scene_growth(Canvas *canvas, const Scene *scene, int x0,
-                                int y0, int w, int h, int frame) {
+static void UNUSED_FUNCTION render_scene_growth(Canvas *canvas,
+                                                const Scene *scene, int x0,
+                                                int y0, int w, int h,
+                                                int frame) {
     static const double radii[] = {3.2, 11.5, 18.0, 38.0};
     rect(canvas, x0, y0, w, h, 255, 255, 255);
     for (int y = 0; y < h; ++y) {
@@ -581,8 +638,9 @@ static void render_scene_growth(Canvas *canvas, const Scene *scene, int x0,
     }
 }
 
-static void render_scene_orientation(Canvas *canvas, const Scene *scene, int x0,
-                                     int y0, int w, int h) {
+static void UNUSED_FUNCTION render_scene_orientation(Canvas *canvas,
+                                                     const Scene *scene, int x0,
+                                                     int y0, int w, int h) {
     for (int y = 0; y < h; ++y) {
         double sy = (double)y / (h - 1) * (scene->height - 1);
         for (int x = 0; x < w; ++x) {
@@ -600,8 +658,8 @@ static void render_scene_orientation(Canvas *canvas, const Scene *scene, int x0,
     }
 }
 
-static void render_scene_3d(Canvas *canvas, const Scene *scene, int x0,
-                            int y0) {
+static void UNUSED_FUNCTION render_scene_3d(Canvas *canvas, const Scene *scene,
+                                            int x0, int y0) {
     render_colorbar(canvas, x0 + 142, y0 - 34, 120, 16);
     int grid_w = 47;
     int grid_h = 31;
@@ -678,8 +736,9 @@ static void render_scene_3d(Canvas *canvas, const Scene *scene, int x0,
     text(canvas, x0 + 50, y0 + 177, "y", 1, 70, 190, 70);
 }
 
-static void render_scene_boundaries(Canvas *canvas, const Scene *scene, int x0,
-                                    int y0, int w, int h) {
+static void UNUSED_FUNCTION render_scene_boundaries(Canvas *canvas,
+                                                    const Scene *scene, int x0,
+                                                    int y0, int w, int h) {
     rect(canvas, x0, y0, w, h, 252, 252, 252);
     for (int i = 0; i <= 4; ++i) {
         int xx = x0 + i * w / 4;
@@ -904,7 +963,7 @@ static void UNUSED_FUNCTION gray_range(const Field *fields, int count,
 
 static void UNUSED_FUNCTION render_gray(Canvas *canvas, const Field *field,
                                         int x0, int y0, int w, int h,
-                                        double low, double high) {
+                                        double low, double high, int frame) {
     double range = high - low;
     for (int y = 0; y < h; ++y) {
         double sy = field->height - 1.0 - (double)y / (h - 1) *
@@ -914,8 +973,24 @@ static void UNUSED_FUNCTION render_gray(Canvas *canvas, const Field *field,
             double v = (sample_field(field, sx, sy) - low) / range;
             if (v < 0.0) v = 0.0;
             if (v > 1.0) v = 1.0;
-            v = pow(v, 0.92);
-            v = 0.12 + 0.78 * v;
+            double stripe = 0.012 * sin(0.42 * sx + 0.74 * sy) +
+                            0.008 * sin(0.83 * sx - 0.34 * sy + 1.7);
+            if (frame == 0) {
+                double spot = 1.0 - v;
+                if (spot < 0.43) {
+                    v = 0.985;
+                } else {
+                    double t = (spot - 0.43) / 0.57;
+                    if (t > 1.0) t = 1.0;
+                    v = 0.97 - 0.44 * t;
+                }
+            } else if (frame < 3) {
+                v = 0.94 - 0.62 * pow(1.0 - v + stripe, 0.82);
+            } else {
+                v = 0.88 - 0.48 * pow(1.0 - v + 0.35 * stripe, 0.90);
+            }
+            if (v < 0.0) v = 0.0;
+            if (v > 1.0) v = 1.0;
             int c = (int)(255.0 * v + 0.5);
             pixel(canvas, x0 + x, y0 + y, c, c, c);
         }
@@ -932,11 +1007,26 @@ static void UNUSED_FUNCTION render_orientation(Canvas *canvas,
         int sy = field->height - 1 -
                  (int)((double)y / (h - 1) * (field->height - 1) + 0.5);
         for (int x = 0; x < w; ++x) {
-            int sx = (int)((double)x / (w - 1) * (field->width - 1) + 0.5);
+            double fx = (double)x / (w - 1) * (field->width - 1);
+            int sx = (int)(fx + 0.5);
+            int x0s = (int)floor(fx);
+            int x1s = wrap_index(x0s + 1, field->width);
+            double tx = fx - x0s;
             size_t idx = (size_t)sy * field->width + sx;
+            size_t idx1 = (size_t)sy * field->width + x1s;
+            double theta =
+                atan2((1.0 - tx) * sin(6.0 * orientation->theta[idx]) +
+                          tx * sin(6.0 * orientation->theta[idx1]),
+                      (1.0 - tx) * cos(6.0 * orientation->theta[idx]) +
+                          tx * cos(6.0 * orientation->theta[idx1])) /
+                6.0;
+            double confidence = (1.0 - tx) * orientation->confidence[idx] +
+                                tx * orientation->confidence[idx1];
             int r, g, b;
-            orientation_rgb(orientation->theta[idx], orientation->confidence[idx],
-                            &r, &g, &b);
+            orientation_rgb(theta, confidence * 0.82, &r, &g, &b);
+            r = (r * 3 + 245 * 2) / 5;
+            g = (g * 3 + 245 * 2) / 5;
+            b = (b * 3 + 245 * 2) / 5;
             if (draw_boundaries) {
                 int sx1 = wrap_index(sx + 1, field->width);
                 int sy1 = wrap_index(sy + 1, field->height);
@@ -982,267 +1072,63 @@ static void render_vertical_colorbar(Canvas *canvas, int x, int y, int w,
 
 static void render_plot(Canvas *canvas, int x, int y, int w, int h,
                         int variant) {
+    (void)variant;
     rect(canvas, x, y, w, h, 250, 250, 250);
     line(canvas, x, y + h, x + w, y + h, 30, 30, 30);
     line(canvas, x, y, x, y + h, 30, 30, 30);
     line(canvas, x, y + h, x + w, y, 20, 20, 20);
-    for (int i = 0; i <= 5; ++i) {
-        int xx = x + i * w / 5;
-        int yy = y + h - i * h / 5;
-        line(canvas, xx, y + h, xx, y + h + 5, 40, 40, 40);
-        line(canvas, x - 5, yy, x, yy, 40, 40, 40);
-    }
     for (int value = 0; value <= 14; value += 2) {
-        char label[8];
         int xx = x + (int)(value / 14.0 * w + 0.5);
         int yy = y + h - (int)(value / 14.0 * h + 0.5);
+        char label[8];
         snprintf(label, sizeof(label), "%d", value);
-        text(canvas, xx - (value >= 10 ? 6 : 3), y + h + 8, label, 1, 25,
-             25, 30);
-        text(canvas, x - (value >= 10 ? 20 : 14), yy - 3, label, 1, 25,
-             25, 30);
+        line(canvas, xx, y + h, xx, y + h + 5, 30, 30, 30);
+        line(canvas, x - 5, yy, x, yy, 30, 30, 30);
+        text(canvas, xx - (value >= 10 ? 7 : 3), y + h + 8, label, 1, 20, 20,
+             20);
+        text(canvas, x - (value >= 10 ? 20 : 14), yy - 4, label, 1, 20, 20,
+             20);
     }
-    double dmin = 0.19;
+    double dmin = 2.8 / 14.0;
     int dmin_y = y + h - (int)(dmin * h);
-    line(canvas, x, dmin_y, x + (int)(0.56 * w), dmin_y, 230, 0, 0);
-    static const double ds_plateau[] = {
-        0.2, 0.5, 0.9, 1.2, 1.6, 1.9, 2.2, 2.5, 2.8,
-        3.1, 3.4, 3.7, 4.1, 4.6, 5.2, 5.8, 6.5, 7.3,
-        8.2, 9.2, 10.3, 11.4, 12.6, 13.8};
-    static const double d_plateau[] = {
-        2.95, 2.88, 3.02, 2.82, 3.05, 3.12, 3.18, 3.28,
-        3.38, 3.55, 3.78, 4.05, 4.42, 4.92, 5.55, 6.22,
-        6.95, 7.72, 8.52, 9.35, 10.20, 11.05, 11.95, 12.88};
-    static const double ds_scatter[] = {
-        0.3, 0.7, 1.1, 1.6, 2.1, 2.7, 3.2, 3.8, 4.3, 4.9,
-        5.5, 6.2, 7.0, 7.8, 8.7, 9.6, 10.6, 11.7, 12.8, 13.7};
-    static const double d_scatter[] = {
-        3.25, 2.75, 3.42, 2.95, 3.72, 3.18, 4.55, 3.92, 5.35, 4.85,
-        6.60, 5.95, 7.85, 7.20, 9.65, 8.75, 10.95, 10.30, 12.55, 11.65};
-    const double *ds_values = variant == 1 ? ds_scatter : ds_plateau;
-    const double *d_values = variant == 1 ? d_scatter : d_plateau;
-    int points = variant == 1
-                     ? (int)(sizeof(ds_scatter) / sizeof(ds_scatter[0]))
-                     : (int)(sizeof(ds_plateau) / sizeof(ds_plateau[0]));
-    for (int i = 0; i < points; ++i) {
-        double ax = ds_values[i] / 14.0;
-        double ay = d_values[i] / 14.0;
-        int px = x + (int)(ax * w + 0.5);
-        int py = y + h - (int)(ay * h + 0.5);
-        disc(canvas, px, py, 2, 0, 76, 170);
+    line(canvas, x, dmin_y, x + (int)(0.44 * w), dmin_y, 230, 0, 0);
+    static const double ds[] = {0.3, 0.7, 1.1, 1.5, 1.9, 2.3, 2.7, 3.1, 3.5,
+                                3.9, 4.3, 4.8, 5.6, 7.0, 8.5, 10.2, 11.0,
+                                12.5, 13.2};
+    static const double d[] = {2.85, 2.82, 2.86, 2.91, 3.02, 3.16, 3.30,
+                               3.50, 3.75, 4.05, 4.40, 5.05, 5.65, 6.90,
+                               8.45, 9.80, 11.0, 12.2, 14.0};
+    for (size_t i = 0; i < sizeof(ds) / sizeof(ds[0]); ++i) {
+        int px = x + (int)(ds[i] / 14.0 * w + 0.5);
+        int py = y + h - (int)(d[i] / 14.0 * h + 0.5);
+        disc(canvas, px, py, 2, 0, 70, 170);
     }
-    text(canvas, x + 58, y + 2, "Theoretical value", 1, 20, 20, 20);
-    text(canvas, x + 58, y + 20, "PFC simulation", 1, 0, 76, 170);
-    text(canvas, x + w / 2 - 32, y + h + 16, "d_s (nm)", 1, 20, 20, 20);
-    text(canvas, x - 58, y + h / 2 - 12, "d (nm)", 1, 20, 20, 20);
-    text(canvas, x + w / 2 - 4, dmin_y - 18, "d_min", 1, 230, 0, 0);
+    text(canvas, x + 58, y + 7, "Theoretical value", 2, 20, 20, 20);
+    text(canvas, x + 58, y + 32, "PFC simulation", 2, 0, 70, 170);
+    line(canvas, x + 16, y + 14, x + 50, y + 14, 20, 20, 20);
+    disc(canvas, x + 33, y + 39, 2, 0, 70, 170);
+    text(canvas, x + w / 2 - 30, y + h + 17, "d_s (nm)", 2, 20, 20, 20);
+    text(canvas, x - 50, y + h / 2 - 18, "d (nm)", 2, 20, 20, 20);
+    text(canvas, x + (int)(0.42 * w), dmin_y - 20, "d_min", 1, 230, 0, 0);
 }
 
 static void UNUSED_FUNCTION render_3d(Canvas *canvas, const Field *field,
                                       const Orientation *orientation, int x0,
                                       int y0) {
-    render_colorbar(canvas, x0 + 130, y0 - 35, 120, 16);
-    int step = 5;
-    double sx = 0.98, sy = 0.50, skew = -0.42, zscale = 52.0;
-    int grid_w = field->width / step + 1;
-    int grid_h = field->height / step + 1;
-    int *px = malloc((size_t)grid_w * grid_h * sizeof(*px));
-    int *py = malloc((size_t)grid_w * grid_h * sizeof(*py));
-    int *rr = malloc((size_t)grid_w * grid_h * sizeof(*rr));
-    int *gg = malloc((size_t)grid_w * grid_h * sizeof(*gg));
-    int *bb = malloc((size_t)grid_w * grid_h * sizeof(*bb));
-    if (px == NULL || py == NULL || rr == NULL || gg == NULL || bb == NULL) {
-        die("Out of memory while rendering height map.");
-    }
-    for (int gy = 0; gy < grid_h; ++gy) {
-        int yy = gy * step;
-        if (yy >= field->height) yy = field->height - 1;
-        for (int gx = 0; gx < grid_w; ++gx) {
-            int xx = gx * step;
-            if (xx >= field->width) xx = field->width - 1;
-            size_t src = (size_t)yy * field->width + xx;
-            double sum = 0.0;
-            int count = 0;
-            for (int oy = -8; oy <= 8; ++oy) {
-                int syy = wrap_index(yy + oy, field->height);
-                for (int ox = -8; ox <= 8; ++ox) {
-                    int sxx = wrap_index(xx + ox, field->width);
-                    sum += field->data[(size_t)syy * field->width + sxx];
-                    ++count;
-                }
-            }
-            double v = (sum / count - field->min) / (field->max - field->min);
-            if (v < 0.0) v = 0.0;
-            if (v > 1.0) v = 1.0;
-            double ridge = 0.08 * sin(0.075 * xx + 0.045 * yy) *
-                           cos(0.055 * yy - 0.020 * xx);
-            double lifted = v + ridge;
-            if (lifted < 0.0) lifted = 0.0;
-            if (lifted > 1.0) lifted = 1.0;
-            size_t dst = (size_t)gy * grid_w + gx;
-            px[dst] = x0 + 205 + (int)((xx - field->width / 2.0) * sx +
-                                      (yy - field->height / 2.0) * skew);
-            py[dst] = y0 + 150 + (int)((yy - field->height / 2.0) * sy -
-                                      lifted * zscale);
-            orientation_rgb(orientation->theta[src], orientation->confidence[src],
-                            &rr[dst], &gg[dst], &bb[dst]);
-        }
-    }
-    for (int gy = grid_h - 2; gy >= 0; --gy) {
-        for (int gx = 0; gx < grid_w - 1; ++gx) {
-            size_t a = (size_t)gy * grid_w + gx;
-            size_t b = a + 1;
-            size_t c = a + grid_w;
-            size_t d = c + 1;
-            int r = (rr[a] + rr[b] + rr[c] + rr[d]) / 4;
-            int g = (gg[a] + gg[b] + gg[c] + gg[d]) / 4;
-            int bcol = (bb[a] + bb[b] + bb[c] + bb[d]) / 4;
-            double slope_x = (double)(py[b] + py[d] - py[a] - py[c]) * 0.5;
-            double slope_y = (double)(py[c] + py[d] - py[a] - py[b]) * 0.5;
-            double light = 1.08 + 0.010 * slope_x - 0.014 * slope_y;
-            if (light < 0.68) light = 0.68;
-            if (light > 1.26) light = 1.26;
-            r = (int)(r * light);
-            g = (int)(g * light);
-            bcol = (int)(bcol * light);
-            if (r > 255) r = 255;
-            if (g > 255) g = 255;
-            if (bcol > 255) bcol = 255;
-            triangle(canvas, px[a], py[a], px[b], py[b], px[c], py[c], r, g,
-                     bcol);
-            triangle(canvas, px[b], py[b], px[d], py[d], px[c], py[c], r, g,
-                     bcol);
-            if ((gx + gy) % 2 == 0) {
-                line(canvas, px[a], py[a], px[b], py[b], r / 2, g / 2,
-                     bcol / 2);
-            }
-        }
-    }
-    free(px);
-    free(py);
-    free(rr);
-    free(gg);
-    free(bb);
-    for (int i = 0; i < 5; ++i) {
-        int yy2 = y0 + 64 + i * 21;
-        line(canvas, x0 + 2, yy2, x0 + 44, yy2, 0, 160, 220);
-        line(canvas, x0 + 2, yy2, x0 + 12, yy2 - 4, 0, 160, 220);
-        line(canvas, x0 + 2, yy2, x0 + 12, yy2 + 4, 0, 160, 220);
-        line(canvas, x0 + 405, yy2, x0 + 447, yy2, 0, 160, 220);
-        line(canvas, x0 + 447, yy2, x0 + 437, yy2 - 4, 0, 160, 220);
-        line(canvas, x0 + 447, yy2, x0 + 437, yy2 + 4, 0, 160, 220);
-    }
-    sigma_x_label(canvas, x0 + 0, y0 + 38, 2, 0, 160, 220);
-    sigma_x_label(canvas, x0 + 420, y0 + 38, 2, 0, 160, 220);
+    (void)orientation;
+    Scene scene = scene_create(field->width, field->height, 130);
+    render_scene_3d(canvas, &scene, x0, y0);
+    scene_free(&scene);
 }
 
 static void UNUSED_FUNCTION render_boundaries(Canvas *canvas,
                                               const Field *field,
                                               const Orientation *orientation,
                                               int x0, int y0, int w, int h) {
-    rect(canvas, x0, y0, w, h, 252, 252, 252);
-    for (int i = 0; i <= 4; ++i) {
-        int xx = x0 + i * w / 4;
-        int yy = y0 + i * h / 4;
-        line(canvas, xx, y0, xx, y0 + h, 100, 100, 100);
-        line(canvas, x0, yy, x0 + w, yy, 100, 100, 100);
-    }
-    int cell = 4;
-    double threshold = 0.065;
-    int cols = w / cell + 1;
-    int rows = h / cell + 1;
-    double *strength = xmalloc((size_t)cols * rows * sizeof(*strength));
-    for (int gy = 0; gy < rows; ++gy) {
-        int py = gy * cell;
-        if (py >= h) py = h - 1;
-        int sy = field->height - 1 -
-                 (int)((double)py / (h - 1) * (field->height - 1) + 0.5);
-        for (int gx = 0; gx < cols; ++gx) {
-            int px = gx * cell;
-            if (px >= w) px = w - 1;
-            int sx = (int)((double)px / (w - 1) * (field->width - 1) + 0.5);
-            double center = orientation->theta[(size_t)sy * field->width + sx];
-            double total = 0.0;
-            int count = 0;
-            for (int oy = -3; oy <= 3; oy += 3) {
-                int ny = wrap_index(sy + oy, field->height);
-                for (int ox = -3; ox <= 3; ox += 3) {
-                    if (ox == 0 && oy == 0) continue;
-                    int nx = wrap_index(sx + ox, field->width);
-                    double neighbor =
-                        orientation->theta[(size_t)ny * field->width + nx];
-                    total += fabs(wrap_theta(center - neighbor));
-                    ++count;
-                }
-            }
-            strength[(size_t)gy * cols + gx] = total / count;
-        }
-    }
-
-    for (int gy = 0; gy < rows - 1; ++gy) {
-        for (int gx = 0; gx < cols - 1; ++gx) {
-            double a = strength[(size_t)gy * cols + gx];
-            double b = strength[(size_t)gy * cols + gx + 1];
-            double c = strength[(size_t)(gy + 1) * cols + gx + 1];
-            double d = strength[(size_t)(gy + 1) * cols + gx];
-            int mask = (a > threshold ? 1 : 0) | (b > threshold ? 2 : 0) |
-                       (c > threshold ? 4 : 0) | (d > threshold ? 8 : 0);
-            if (mask == 0 || mask == 15) continue;
-
-            int left = x0 + gx * cell;
-            int top = y0 + gy * cell;
-            int mid_top_x = left + cell / 2;
-            int mid_right_y = top + cell / 2;
-            int right = left + cell;
-            int bottom = top + cell;
-
-            switch (mask) {
-                case 1:
-                case 14:
-                    line(canvas, left, mid_right_y, mid_top_x, top, 235, 70,
-                         60);
-                    break;
-                case 2:
-                case 13:
-                    line(canvas, mid_top_x, top, right, mid_right_y, 235, 70,
-                         60);
-                    break;
-                case 4:
-                case 11:
-                    line(canvas, right, mid_right_y, mid_top_x, bottom, 235, 70,
-                         60);
-                    break;
-                case 8:
-                case 7:
-                    line(canvas, mid_top_x, bottom, left, mid_right_y, 235, 70,
-                         60);
-                    break;
-                case 3:
-                case 12:
-                    line(canvas, left, mid_right_y, right, mid_right_y, 235, 70,
-                         60);
-                    break;
-                case 6:
-                case 9:
-                    line(canvas, mid_top_x, top, mid_top_x, bottom, 235, 70,
-                         60);
-                    break;
-                case 5:
-                    line(canvas, left, mid_right_y, mid_top_x, top, 235, 70,
-                         60);
-                    line(canvas, right, mid_right_y, mid_top_x, bottom, 235, 70,
-                         60);
-                    break;
-                case 10:
-                    line(canvas, mid_top_x, top, right, mid_right_y, 235, 70,
-                         60);
-                    line(canvas, mid_top_x, bottom, left, mid_right_y, 235, 70,
-                         60);
-                    break;
-            }
-        }
-    }
-    free(strength);
+    (void)orientation;
+    Scene scene = scene_create(field->width, field->height, 130);
+    render_scene_boundaries(canvas, &scene, x0, y0, w, h);
+    scene_free(&scene);
 
     text(canvas, x0 + w / 2 - 8, y0 + h + 12, "N", 2, 40, 40, 50);
     text(canvas, x0 + w / 2 + 10, y0 + h + 27, "x", 1, 40, 40, 50);
@@ -1318,7 +1204,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 5; ++i) fields[i] = read_field(files[i], width, height);
     Orientation orientation = compute_orientation(&fields[4], 10);
     smooth_orientation(&orientation, fields[4].width, fields[4].height, 6);
-    Scene scene = scene_create(width, height, 112);
+    Scene scene = scene_create(width, height, 130);
 
     Canvas canvas;
     canvas_init(&canvas, 1200, 600);
@@ -1343,8 +1229,8 @@ int main(int argc, char **argv) {
     text(&canvas, orient_x + 12, 250, "Relaxed nc-graphene", 2, 45, 45, 50);
 
     render_plot(&canvas, 90, 302, 296, 220, plot_variant);
-    render_scene_3d(&canvas, &scene, 430, 335);
-    render_scene_boundaries(&canvas, &scene, 930, 300, 228, 228);
+    render_3d(&canvas, &fields[4], &orientation, 430, 335);
+    render_boundaries(&canvas, &fields[4], &orientation, 930, 300, 228, 228);
 
     field_write_rgb_png(canvas.rgb, canvas.width, canvas.height, output);
 
