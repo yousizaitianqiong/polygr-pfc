@@ -1,0 +1,7 @@
+# Reload and relax the trackable seed-growth panel (a) PFC field
+S 20260720
+O 60 60
+A 432 288
+I 2 panel_a_seedgrow1-t-100.dat -0.072 0.1
+M -0.15 1.0 0.87 1.0 0
+R 300 0.7 0.7 1.0 100

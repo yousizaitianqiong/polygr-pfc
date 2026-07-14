@@ -23,6 +23,19 @@ typedef struct {
     size_t capacity;
 } PointVector;
 
+typedef struct {
+    Point point;
+    int ring0;
+    int ring1;
+    int ring2;
+} Carbon;
+
+typedef struct {
+    Carbon *items;
+    size_t count;
+    size_t capacity;
+} CarbonVector;
+
 static void xyz_die(const char *message) {
     fprintf(stderr, "%s\n", message);
     abort();
@@ -45,6 +58,19 @@ static void point_vector_push(PointVector *vector, Point point) {
         vector->capacity = next;
     }
     vector->items[vector->count++] = point;
+}
+
+static void carbon_vector_push(CarbonVector *vector, Carbon carbon) {
+    if (vector->count == vector->capacity) {
+        size_t next = vector->capacity == 0 ? 1024 : vector->capacity * 2;
+        Carbon *items = realloc(vector->items, next * sizeof(*items));
+        if (items == NULL) {
+            xyz_die("Out of memory while storing carbon coordinates.");
+        }
+        vector->items = items;
+        vector->capacity = next;
+    }
+    vector->items[vector->count++] = carbon;
 }
 
 static void bin_push(Bin *bin, int id) {
@@ -113,13 +139,38 @@ static int collect_candidates(const Bin *bins, int nx, int ny, int bx, int by,
 }
 
 static int point_compare(const void *left, const void *right) {
-    const Point *a = left;
-    const Point *b = right;
-    if (a->y < b->y) return -1;
-    if (a->y > b->y) return 1;
-    if (a->x < b->x) return -1;
-    if (a->x > b->x) return 1;
+    const Carbon *a = left;
+    const Carbon *b = right;
+    if (a->point.y < b->point.y) return -1;
+    if (a->point.y > b->point.y) return 1;
+    if (a->point.x < b->point.x) return -1;
+    if (a->point.x > b->point.x) return 1;
     return 0;
+}
+
+static void mark_coordination(const CarbonVector *carbons,
+                              double physical_width, double physical_height,
+                              int *coordination) {
+    const double bond_cutoff = 1.85;
+    const double bond_cutoff2 = bond_cutoff * bond_cutoff;
+    for (size_t i = 0; i < carbons->count; ++i) {
+        coordination[i] = 0;
+    }
+#pragma omp parallel for schedule(dynamic, 64)
+    for (int i = 0; i < (int)carbons->count; ++i) {
+        int count = 0;
+        Point origin = carbons->items[i].point;
+        for (size_t j = 0; j < carbons->count; ++j) {
+            if ((size_t)i == j) continue;
+            Point delta = periodic_difference(carbons->items[j].point, origin,
+                                              physical_width, physical_height);
+            double distance2 = point_norm2(delta);
+            if (distance2 < bond_cutoff2) {
+                ++count;
+            }
+        }
+        coordination[i] = count;
+    }
 }
 
 void xyz_write_from_field(const double *source, int width, int height,
@@ -212,10 +263,10 @@ void xyz_write_from_field(const double *source, int width, int height,
     }
 
     int max_candidates = (int)rings.count;
-    PointVector carbons = {0};
+    CarbonVector carbons = {0};
 #pragma omp parallel
     {
-        PointVector local = {0};
+        CarbonVector local = {0};
         int *candidates =
             xyz_malloc((size_t)max_candidates * sizeof(*candidates));
 #pragma omp for schedule(dynamic, 32)
@@ -260,12 +311,17 @@ void xyz_write_from_field(const double *source, int width, int height,
                         }
                     }
                     if (empty) {
-                        Point carbon = {
+                        Carbon carbon = {
+                            {
                             wrap_coordinate(origin.x + (ij.x + ik.x) / 3.0,
                                             physical_width),
                             wrap_coordinate(origin.y + (ij.y + ik.y) / 3.0,
-                                            physical_height)};
-                        point_vector_push(&local, carbon);
+                                            physical_height)
+                            },
+                            i,
+                            j,
+                            k};
+                        carbon_vector_push(&local, carbon);
                     }
                 }
             }
@@ -273,7 +329,7 @@ void xyz_write_from_field(const double *source, int width, int height,
 #pragma omp critical
         {
             for (size_t i = 0; i < local.count; ++i) {
-                point_vector_push(&carbons, local.items[i]);
+                carbon_vector_push(&carbons, local.items[i]);
             }
         }
         free(candidates);
@@ -281,6 +337,16 @@ void xyz_write_from_field(const double *source, int width, int height,
     }
 
     qsort(carbons.items, carbons.count, sizeof(*carbons.items), point_compare);
+    int *ring_size = calloc(rings.count, sizeof(*ring_size));
+    int *coordination = xyz_malloc(carbons.count * sizeof(*coordination));
+    if (ring_size == NULL) xyz_die("Out of memory while classifying rings.");
+    for (size_t i = 0; i < carbons.count; ++i) {
+        ++ring_size[carbons.items[i].ring0];
+        ++ring_size[carbons.items[i].ring1];
+        ++ring_size[carbons.items[i].ring2];
+    }
+    mark_coordination(&carbons, physical_width, physical_height, coordination);
+
     FILE *xyz = fopen(filename, "w");
     if (xyz == NULL) xyz_die("Unable to write XYZ output.");
     fprintf(xyz, "%zu\n", carbons.count);
@@ -288,12 +354,22 @@ void xyz_write_from_field(const double *source, int width, int height,
             "Lattice=\"%.10f 0 0 0 %.10f 0 0 0 20\" "
             "Origin=\"0 0 -10\" "
             "Properties=\"id:I:1:species:S:1:pos:R:3:"
-            "radius:R:1:color:R:3\" "
+            "coordination:I:1:ring0:I:1:ring1:I:1:ring2:I:1:"
+            "gb:I:1:Radius:R:1:Color:R:3\" "
             "pbc=\"T T F\"\n",
             physical_width, physical_height);
     for (size_t i = 0; i < carbons.count; ++i) {
-        fprintf(xyz, "%zu C %.10f %.10f 0 0.70 0.35 0.35 0.35\n", i + 1,
-                carbons.items[i].x, carbons.items[i].y);
+        int r0 = ring_size[carbons.items[i].ring0];
+        int r1 = ring_size[carbons.items[i].ring1];
+        int r2 = ring_size[carbons.items[i].ring2];
+        int gb = coordination[i] != 3 || r0 != 6 || r1 != 6 || r2 != 6;
+        double red = gb ? 0.95 : 0.35;
+        double green = gb ? 0.10 : 0.35;
+        double blue = gb ? 0.05 : 0.35;
+        fprintf(xyz,
+                "%zu C %.10f %.10f 0 %d %d %d %d %d 0.70 %.2f %.2f %.2f\n",
+                i + 1, carbons.items[i].point.x, carbons.items[i].point.y,
+                coordination[i], r0, r1, r2, gb, red, green, blue);
     }
     fclose(xyz);
     printf("Wrote %zu carbon atoms to %s\n", carbons.count, filename);
@@ -301,5 +377,7 @@ void xyz_write_from_field(const double *source, int width, int height,
     for (int i = 0; i < nx * ny; ++i) free(bins[i].ids);
     free(bins);
     free(rings.items);
+    free(ring_size);
+    free(coordination);
     free(carbons.items);
 }

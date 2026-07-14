@@ -31,6 +31,22 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
+& $gcc -O3 -std=c11 -Wall -Wextra `
+    -I"$msys\include" "src\gbmap.c" "src\field_image.c" `
+    -L"$msys\lib" -lm `
+    -o "polygr_gbmap.exe"
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+& $gcc -O3 -std=c11 -Wall -Wextra `
+    -I"$msys\include" "src\orient_gbmap.c" "src\field_image.c" `
+    -L"$msys\lib" -lm `
+    -o "polygr_orient_gbmap.exe"
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
 $runtimeDlls = @(
     "libfftw3-3.dll",
     "libfftw3_omp-3.dll",
@@ -42,4 +58,4 @@ foreach ($dll in $runtimeDlls) {
     Copy-Item (Join-Path $msys "bin\$dll") -Destination $dll -Force
 }
 
-Write-Host "Built $PWD\polygr.exe, $PWD\polygr_figure.exe, and $PWD\polygr_figure_samples.exe"
+Write-Host "Built $PWD\polygr.exe, $PWD\polygr_figure.exe, $PWD\polygr_figure_samples.exe, $PWD\polygr_gbmap.exe, and $PWD\polygr_orient_gbmap.exe"

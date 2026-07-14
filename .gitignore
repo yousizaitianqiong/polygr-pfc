@@ -10,6 +10,7 @@ polygr_figure_samples
 polygr_figure_samples.exe
 *.dll
 *.log
+test-output/
 
 # PFC and coordinate output
 *.out

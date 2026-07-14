@@ -212,6 +212,112 @@ static void polycrystalline_state(Arrays *arrays, double dx, double dy,
     free(grains);
 }
 
+static void island_state(Arrays *arrays, double dx, double dy, double lattice,
+                         double density, double amplitude, int grain_count,
+                         double core_radius, double growth_radius,
+                         double growth_strength) {
+    if (grain_count <= 0 || core_radius <= 0.0 || growth_radius <= 0.0) {
+        die("Invalid island initialization.");
+    }
+    if (growth_strength < 0.0) {
+        die("Invalid island growth strength.");
+    }
+    if (core_radius > growth_radius) {
+        die("Island core radius cannot exceed growth radius.");
+    }
+    double *grains =
+        checked_malloc((size_t)grain_count * 3 * sizeof(*grains));
+    double core_sigma = core_radius * lattice;
+    double growth_sigma = growth_radius * lattice;
+    double min_spacing = 1.65 * growth_sigma / dx;
+    if (min_spacing < 4.0) min_spacing = 4.0;
+    int placed = 0;
+    int attempts = 0;
+    int max_attempts = grain_count * 700;
+    while (placed < grain_count && attempts < max_attempts) {
+        ++attempts;
+        double gx = (double)rand() / RAND_MAX * arrays->w;
+        double gy = (double)rand() / RAND_MAX * arrays->h;
+        int accepted = 1;
+        for (int grain = 0; grain < placed; ++grain) {
+            double rx = gx - grains[3 * grain];
+            double ry = gy - grains[3 * grain + 1];
+            if (rx > 0.5 * arrays->w) rx -= arrays->w;
+            if (rx < -0.5 * arrays->w) rx += arrays->w;
+            if (ry > 0.5 * arrays->h) ry -= arrays->h;
+            if (ry < -0.5 * arrays->h) ry += arrays->h;
+            if (rx * rx + ry * ry < min_spacing * min_spacing) {
+                accepted = 0;
+                break;
+            }
+        }
+        if (!accepted) {
+            continue;
+        }
+        grains[3 * placed] = gx;
+        grains[3 * placed + 1] = gy;
+        grains[3 * placed + 2] = PI / 3.0 * rand() / RAND_MAX - PI / 6.0;
+        ++placed;
+    }
+    if (placed < grain_count) {
+        fprintf(stderr,
+                "Island initialization placed %d of %d seeds at spacing %.3f; "
+                "continuing without random fill.\n",
+                placed, grain_count, min_spacing);
+        grain_count = placed;
+        if (grain_count <= 0) {
+            free(grains);
+            die("Island initialization placed no seeds.");
+        }
+    }
+
+    int stride = 2 * arrays->wc;
+    double core_cutoff = 2.15 * core_sigma;
+    double growth_cutoff = 2.2 * growth_sigma;
+    double growth_cutoff2 = growth_cutoff * growth_cutoff;
+#pragma omp parallel for schedule(static)
+    for (int y = 0; y < arrays->h; ++y) {
+        for (int x = 0; x < arrays->w; ++x) {
+            double best_value = 0.0;
+            for (int grain = 0; grain < grain_count; ++grain) {
+                double rx = x - grains[3 * grain];
+                double ry = y - grains[3 * grain + 1];
+                if (rx > 0.5 * arrays->w) rx -= arrays->w;
+                if (rx < -0.5 * arrays->w) rx += arrays->w;
+                if (ry > 0.5 * arrays->h) ry -= arrays->h;
+                if (ry < -0.5 * arrays->h) ry += arrays->h;
+                rx *= dx;
+                ry *= dy;
+                double r2 = rx * rx + ry * ry;
+                if (r2 > growth_cutoff2) continue;
+                double r = sqrt(r2);
+                double core_t = r / core_cutoff;
+                double core_taper =
+                    core_t < 1.0 ? 1.0 - core_t * core_t * (3.0 - 2.0 * core_t)
+                                 : 0.0;
+                double core_weight =
+                    core_taper * core_taper *
+                    exp(-0.50 * r2 / (core_sigma * core_sigma));
+                double growth_t = r / growth_cutoff;
+                double growth_taper =
+                    1.0 - growth_t * growth_t * (3.0 - 2.0 * growth_t);
+                double growth_weight =
+                    growth_strength * growth_taper * growth_taper *
+                    exp(-0.55 * r2 / (growth_sigma * growth_sigma));
+                double mode = one_mode(rx, ry, lattice, grains[3 * grain + 2]);
+                double oriented_seed = (mode + 1.5) / 3.0;
+                if (oriented_seed < 0.0) oriented_seed = 0.0;
+                if (oriented_seed > 1.0) oriented_seed = 1.0;
+                double value = core_weight + growth_weight * oriented_seed;
+                if (value > best_value) best_value = value;
+            }
+            arrays->q[(size_t)y * stride + x] =
+                density + amplitude * best_value;
+        }
+    }
+    free(grains);
+}
+
 static void read_state(Arrays *arrays, FILE *file, double density,
                        double amplitude) {
     int stride = 2 * arrays->wc;
@@ -265,6 +371,26 @@ static void initialize_system(Arrays *arrays, FILE *input) {
         }
         polycrystalline_state(arrays, dx, dy, lattice, density, amplitude,
                               grains, radius);
+    } else if (type == 3) {
+        int grains;
+        double dx, dy, lattice, density, amplitude, core_radius, growth_radius;
+        double growth_strength = 0.035;
+        char line[1024];
+        char *rest = fgets(line, sizeof(line), input);
+        if (rest == NULL) {
+            die("Invalid island initialization.");
+        }
+        int fields =
+            sscanf(line, " %lf %lf %lf %lf %lf %d %lf %lf %lf", &dx, &dy,
+                   &lattice, &density, &amplitude, &grains, &core_radius,
+                   &growth_radius, &growth_strength);
+        if (fields == 7) {
+            growth_radius = core_radius;
+        } else if (fields != 8 && fields != 9) {
+            die("Invalid island initialization.");
+        }
+        island_state(arrays, dx, dy, lattice, density, amplitude, grains,
+                     core_radius, growth_radius, growth_strength);
     } else if (type == 2) {
         char filename[256];
         double density, amplitude;
